@@ -24,8 +24,8 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         protected override bool KillCore(int fd)
         {
-            // Use kill() directly instead of ioctl(TIOCSIG) which may not work on newer macOS versions
-            return kill(this.Pid, SIGHUP) != -1;
+            // Use SIGKILL for immediate termination - cannot be caught or ignored
+            return kill(this.Pid, SIGKILL) != -1;
         }
 
         /// <inheritdoc/>

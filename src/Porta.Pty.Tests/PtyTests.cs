@@ -229,7 +229,8 @@ namespace Porta.Pty.Tests
                 }
             }
 
-            string command = IsWindows ? "cd" : "pwd";
+            // Use echo with a marker so we know the command ran, then pwd/cd
+            string command = IsWindows ? "echo CWDTEST && cd" : "echo CWDTEST && pwd";
 
             var options = new PtyOptions
             {
@@ -247,14 +248,12 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Wait for output - use a longer timeout and search for path separator
-            string output = await ReadOutputUntilAsync(terminal, Path.DirectorySeparatorChar.ToString(), cts.Token);
+            // Wait for CWDTEST marker first, then continue reading
+            string output = await ReadOutputUntilAsync(terminal, "CWDTEST", cts.Token);
 
-            // If we didn't get output with the search, try reading for duration
-            if (string.IsNullOrWhiteSpace(output))
-            {
-                output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(3), cts.Token);
-            }
+            // Read a bit more to get the pwd output
+            string moreOutput = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
+            output += moreOutput;
 
             await CleanupTerminalAsync(terminal);
 
@@ -263,8 +262,7 @@ namespace Porta.Pty.Tests
             // Linux: /tmp
             // Windows: C:\Users\...\AppData\Local\Temp
             bool containsPath = !string.IsNullOrWhiteSpace(output) &&
-                               (output.Contains(Path.DirectorySeparatorChar) ||
-                                output.Contains("tmp", StringComparison.OrdinalIgnoreCase) ||
+                               (output.Contains("tmp", StringComparison.OrdinalIgnoreCase) ||
                                 output.Contains("Temp", StringComparison.OrdinalIgnoreCase) ||
                                 output.Contains("var", StringComparison.OrdinalIgnoreCase) ||
                                 output.Contains("folders", StringComparison.OrdinalIgnoreCase) ||
@@ -363,6 +361,12 @@ namespace Porta.Pty.Tests
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
             await ReadOutputUntilAsync(terminal, "success", cts.Token);
+
+            // Give the process a moment to fully exit after output
+            await Task.Delay(500, cts.Token);
+
+            // Drain any remaining output
+            await ReadOutputForDurationAsync(terminal, TimeSpan.FromMilliseconds(500), cts.Token);
 
             Assert.True(terminal.WaitForExit(5000), "Process should exit");
 
