@@ -1,4 +1,4 @@
-﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 namespace Porta.Pty.Unix
@@ -16,12 +16,14 @@ namespace Porta.Pty.Unix
     {
         private const int EINTR = 4;
         private const int ECHILD = 10;
+        private const int ESRCH = 3;
 
         private readonly int controller;
         private readonly int pid;
         private readonly ManualResetEvent terminalProcessTerminatedEvent = new ManualResetEvent(false);
         private int exitCode;
         private int exitSignal;
+        private bool isDisposed;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="PtyConnection"/> class.
@@ -63,24 +65,38 @@ namespace Porta.Pty.Unix
         /// <inheritdoc/>
         public void Dispose()
         {
+            if (this.isDisposed)
+            {
+                return;
+            }
+
+            this.isDisposed = true;
+
             this.ReaderStream?.Dispose();
             this.WriterStream?.Dispose();
-            this.Kill();
+
+            // Try to kill the process, but don't throw if it already exited
+            this.TryKill();
         }
 
         /// <inheritdoc/>
         public void Kill()
         {
-            if (!this.Kill(this.controller))
+            if (!this.KillCore(this.controller))
             {
-                throw new InvalidOperationException($"Killing terminal failed with error {Marshal.GetLastWin32Error()}");
+                int errno = Marshal.GetLastWin32Error();
+                // ESRCH means the process doesn't exist (already exited) - that's OK
+                if (errno != ESRCH)
+                {
+                    throw new InvalidOperationException($"Killing terminal failed with error {errno}");
+                }
             }
         }
 
         /// <inheritdoc/>
         public void Resize(int cols, int rows)
         {
-            if (!this.Resize(this.controller, cols, rows))
+            if (!this.ResizeCore(this.controller, cols, rows))
             {
                 throw new InvalidOperationException($"Resizing terminal failed with error {Marshal.GetLastWin32Error()}");
             }
@@ -99,14 +115,14 @@ namespace Porta.Pty.Unix
         /// <param name="cols">The number of columns to resize to.</param>
         /// <param name="rows">The number of rows to resize to.</param>
         /// <returns>True if the function suceeded to resize the pty, false otherwise.</returns>
-        protected abstract bool Resize(int controller, int cols, int rows);
+        protected abstract bool ResizeCore(int controller, int cols, int rows);
 
         /// <summary>
         /// Kills the terminal process.
         /// </summary>
         /// <param name="controller">The fd of the pty controller.</param>
         /// <returns>True if the function succeeded in killing the process, false otherwise.</returns>
-        protected abstract bool Kill(int controller);
+        protected abstract bool KillCore(int controller);
 
         /// <summary>
         /// OS-specific implementation of waiting on the given process id.
@@ -115,6 +131,21 @@ namespace Porta.Pty.Unix
         /// <param name="status">The status of the process.</param>
         /// <returns>True if the function succeeded to get the status of the process, false otherwise.</returns>
         protected abstract bool WaitPid(int pid, ref int status);
+
+        /// <summary>
+        /// Attempts to kill the process without throwing an exception.
+        /// </summary>
+        private void TryKill()
+        {
+            try
+            {
+                this.Kill();
+            }
+            catch
+            {
+                // Ignore errors during cleanup - process may have already exited
+            }
+        }
 
         private void ChildWatcherThreadProc()
         {

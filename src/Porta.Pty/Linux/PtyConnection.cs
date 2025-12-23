@@ -22,13 +22,13 @@ namespace Porta.Pty.Linux
         }
 
         /// <inheritdoc/>
-        protected override bool Kill(int controller)
+        protected override bool KillCore(int controller)
         {
             return kill(this.Pid, SIGHUP) != -1;
         }
 
         /// <inheritdoc/>
-        protected override bool Resize(int fd, int cols, int rows)
+        protected override bool ResizeCore(int fd, int cols, int rows)
         {
             var size = new WinSize((ushort)rows, (ushort)cols);
             return ioctl(fd, TIOCSWINSZ, ref size) != -1;

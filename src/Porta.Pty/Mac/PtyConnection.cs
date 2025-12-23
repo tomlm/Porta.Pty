@@ -22,13 +22,13 @@ namespace Porta.Pty.Mac
         }
 
         /// <inheritdoc/>
-        protected override bool Kill(int fd)
+        protected override bool KillCore(int fd)
         {
             return ioctl(fd, TIOCSIG, SIGHUP) != -1;
         }
 
         /// <inheritdoc/>
-        protected override bool Resize(int fd, int cols, int rows)
+        protected override bool ResizeCore(int fd, int cols, int rows)
         {
             var size = new WinSize((ushort)rows, (ushort)cols);
             return ioctl(fd, TIOCSWINSZ, ref size) != -1;
