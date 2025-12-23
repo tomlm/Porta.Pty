@@ -72,8 +72,8 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Read output until we find "test" or timeout
-            string output = await ReadOutputUntilAsync(terminal, "test", cts.Token);
+            // Use duration-based reading which is more reliable with parallel test execution
+            string output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
 
             Assert.Contains("test", output);
 

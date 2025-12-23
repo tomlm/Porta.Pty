@@ -24,17 +24,17 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         protected override bool KillCore(int fd)
         {
-            // Kill the entire process group by passing negative PID
-            // This ensures all child processes spawned by the shell are also terminated
             // First try SIGHUP (standard terminal hangup signal)
-            kill(-this.Pid, SIGHUP);
+            // This is the proper signal for terminal processes
+            bool result = kill(this.Pid, SIGHUP) != -1;
             
             // Give a brief moment for graceful shutdown
-            Thread.Sleep(50);
+            Thread.Sleep(100);
             
             // Then send SIGKILL to ensure termination (cannot be caught or ignored)
-            // Also kill the process group
-            return kill(-this.Pid, SIGKILL) != -1 || kill(this.Pid, SIGKILL) != -1;
+            kill(this.Pid, SIGKILL);
+            
+            return result;
         }
 
         /// <inheritdoc/>
@@ -47,32 +47,9 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         protected override bool WaitPid(int pid, ref int status)
         {
-            // On macOS, use a polling approach with WNOHANG to avoid blocking indefinitely
-            // This is more reliable on ARM64 macOS where blocking waitpid can sometimes hang
-            const int maxAttempts = 600; // 60 seconds max (100ms * 600)
-            
-            for (int i = 0; i < maxAttempts; i++)
-            {
-                int result = waitpid(pid, ref status, WNOHANG);
-                
-                if (result == pid)
-                {
-                    // Process has exited
-                    return true;
-                }
-                else if (result == -1)
-                {
-                    // Error occurred (e.g., ECHILD - no child process)
-                    // This can happen if the process was already reaped
-                    return false;
-                }
-                // result == 0 means process is still running, keep polling
-                
-                Thread.Sleep(100);
-            }
-            
-            // Timeout - process didn't exit in time
-            return false;
+            // Use blocking waitpid - the background thread will wait for the process to exit
+            // This is the same approach as Linux and is reliable
+            return waitpid(pid, ref status, 0) != -1;
         }
     }
 }
