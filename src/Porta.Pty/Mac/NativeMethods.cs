@@ -22,6 +22,9 @@ namespace Porta.Pty.Mac
         internal const int SIGTERM = 15;
         internal const int SIGKILL = 9;
 
+        // waitpid options
+        internal const int WNOHANG = 1;
+
         private const string LibSystem = "libSystem.dylib";
 
         private static readonly int SizeOfIntPtr = Marshal.SizeOf(typeof(IntPtr));

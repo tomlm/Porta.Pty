@@ -3,7 +3,6 @@
 
 namespace Porta.Pty.Mac
 {
-    using System.Diagnostics;
     using System.Threading;
     using static Porta.Pty.Mac.NativeMethods;
 
@@ -25,21 +24,17 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         protected override bool KillCore(int fd)
         {
-            // First try SIGHUP which is the standard way to terminate terminal processes
-            // This gives the process a chance to clean up
-            if (kill(this.Pid, SIGHUP) == -1)
-            {
-                return false;
-            }
-
-            // Give the process a moment to respond to SIGHUP
-            Thread.Sleep(100);
-
-            // If still running, send SIGKILL for immediate termination
-            // SIGKILL cannot be caught or ignored
-            kill(this.Pid, SIGKILL);
-
-            return true;
+            // Kill the entire process group by passing negative PID
+            // This ensures all child processes spawned by the shell are also terminated
+            // First try SIGHUP (standard terminal hangup signal)
+            kill(-this.Pid, SIGHUP);
+            
+            // Give a brief moment for graceful shutdown
+            Thread.Sleep(50);
+            
+            // Then send SIGKILL to ensure termination (cannot be caught or ignored)
+            // Also kill the process group
+            return kill(-this.Pid, SIGKILL) != -1 || kill(this.Pid, SIGKILL) != -1;
         }
 
         /// <inheritdoc/>
@@ -52,7 +47,32 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         protected override bool WaitPid(int pid, ref int status)
         {
-            return waitpid(pid, ref status, 0) != -1;
+            // On macOS, use a polling approach with WNOHANG to avoid blocking indefinitely
+            // This is more reliable on ARM64 macOS where blocking waitpid can sometimes hang
+            const int maxAttempts = 600; // 60 seconds max (100ms * 600)
+            
+            for (int i = 0; i < maxAttempts; i++)
+            {
+                int result = waitpid(pid, ref status, WNOHANG);
+                
+                if (result == pid)
+                {
+                    // Process has exited
+                    return true;
+                }
+                else if (result == -1)
+                {
+                    // Error occurred (e.g., ECHILD - no child process)
+                    // This can happen if the process was already reaped
+                    return false;
+                }
+                // result == 0 means process is still running, keep polling
+                
+                Thread.Sleep(100);
+            }
+            
+            // Timeout - process didn't exit in time
+            return false;
         }
     }
 }

@@ -142,8 +142,7 @@ namespace Porta.Pty.Tests
         [Fact]
         public async Task Kill_TerminatesProcess()
         {
-            // Use a longer timeout for this specific test since kill cleanup can be slow on macOS
-            using var cts = new CancellationTokenSource(30_000);
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
 
             var options = CreateInteractiveShellOptions("KillTest");
 
@@ -157,8 +156,8 @@ namespace Porta.Pty.Tests
             terminal.Kill();
 
             // Give time for the process to fully terminate
-            // On macOS, the kill signal may take longer to be reflected in waitpid
-            bool exited = terminal.WaitForExit(15000);
+            // The polling WaitPid should detect termination quickly
+            bool exited = terminal.WaitForExit(5000);
 
             Assert.True(exited, "Process should exit after being killed");
         }
