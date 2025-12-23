@@ -4,6 +4,7 @@
 namespace Porta.Pty.Mac
 {
     using System.Diagnostics;
+    using System.Threading;
     using static Porta.Pty.Mac.NativeMethods;
 
     /// <summary>
@@ -24,8 +25,21 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         protected override bool KillCore(int fd)
         {
-            // Use SIGKILL for immediate termination - cannot be caught or ignored
-            return kill(this.Pid, SIGKILL) != -1;
+            // First try SIGHUP which is the standard way to terminate terminal processes
+            // This gives the process a chance to clean up
+            if (kill(this.Pid, SIGHUP) == -1)
+            {
+                return false;
+            }
+
+            // Give the process a moment to respond to SIGHUP
+            Thread.Sleep(100);
+
+            // If still running, send SIGKILL for immediate termination
+            // SIGKILL cannot be caught or ignored
+            kill(this.Pid, SIGKILL);
+
+            return true;
         }
 
         /// <inheritdoc/>

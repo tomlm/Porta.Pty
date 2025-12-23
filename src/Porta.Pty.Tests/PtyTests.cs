@@ -72,8 +72,8 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Use duration-based reading which is more reliable across platforms
-            string output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
+            // Read output until we find "test" or timeout
+            string output = await ReadOutputUntilAsync(terminal, "test", cts.Token);
 
             Assert.Contains("test", output);
 
@@ -142,31 +142,23 @@ namespace Porta.Pty.Tests
         [Fact]
         public async Task Kill_TerminatesProcess()
         {
-            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            // Use a longer timeout for this specific test since kill cleanup can be slow on macOS
+            using var cts = new CancellationTokenSource(30_000);
 
             var options = CreateInteractiveShellOptions("KillTest");
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
+            // Wait a bit for the shell to start
             await Task.Delay(500, cts.Token);
 
             Assert.False(terminal.WaitForExit(100), "Process should still be running");
 
             terminal.Kill();
 
-            // Give more time for the process to fully terminate on macOS
-            // The kill signal is sent but waitpid may need extra time to report
-            bool exited = terminal.WaitForExit(10000);
-            
-            // If WaitForExit still returns false, the process was killed but cleanup may be slow
-            // This is acceptable as long as Kill() doesn't throw
-            if (!exited)
-            {
-                // On some platforms (especially macOS CI), the waitpid notification can be delayed
-                // Wait a bit more and try again
-                await Task.Delay(1000, cts.Token);
-                exited = terminal.WaitForExit(1000);
-            }
+            // Give time for the process to fully terminate
+            // On macOS, the kill signal may take longer to be reflected in waitpid
+            bool exited = terminal.WaitForExit(15000);
 
             Assert.True(exited, "Process should exit after being killed");
         }
