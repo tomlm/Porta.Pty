@@ -211,6 +211,9 @@ namespace Porta.Pty.Mac
         [DllImport(LibSystem, SetLastError = true)]
         private static extern int unsetenv(string name);
 
+        [DllImport(LibSystem, SetLastError = true)]
+        internal static extern int chdir(string path);
+
         internal static void execvpe(string file, string?[] args, IDictionary<string, string> environment)
         {
             // Set TERM if not already set (important for PTY)

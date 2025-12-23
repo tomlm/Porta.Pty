@@ -93,7 +93,8 @@ namespace Porta.Pty.Mac
             {
                 // We are in a forked process! See http://man7.org/linux/man-pages/man2/fork.2.html for details.
                 // Only our thread is running. We inherited open file descriptors and get a copy of the parent process memory.
-                Environment.CurrentDirectory = options.Cwd;
+                // Use native chdir() instead of Environment.CurrentDirectory which may not work in forked process
+                chdir(options.Cwd);
                 execvpe(options.App, terminalArgs, options.Environment);
 
                 // Unreachable code after execvpe()
