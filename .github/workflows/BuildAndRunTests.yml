@@ -7,10 +7,12 @@ on:
       - main
     paths:
     - src/**
+    - .github/workflows/**
   pull_request:
     branches: [ "main" ]
     paths:
     - src/**
+    - .github/workflows/**
     
 jobs:
   build:
@@ -21,9 +23,9 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup .NET
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 10.0.x
+        dotnet-version: 8.0.x
 
     - name: Restore dependencies
       run: dotnet restore src/Porta.Pty.sln
