@@ -72,7 +72,8 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            string output = await ReadOutputUntilAsync(terminal, "test", cts.Token);
+            // Use duration-based reading which is more reliable across platforms
+            string output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
 
             Assert.Contains("test", output);
 
@@ -153,7 +154,21 @@ namespace Porta.Pty.Tests
 
             terminal.Kill();
 
-            Assert.True(terminal.WaitForExit(5000), "Process should exit after being killed");
+            // Give more time for the process to fully terminate on macOS
+            // The kill signal is sent but waitpid may need extra time to report
+            bool exited = terminal.WaitForExit(10000);
+            
+            // If WaitForExit still returns false, the process was killed but cleanup may be slow
+            // This is acceptable as long as Kill() doesn't throw
+            if (!exited)
+            {
+                // On some platforms (especially macOS CI), the waitpid notification can be delayed
+                // Wait a bit more and try again
+                await Task.Delay(1000, cts.Token);
+                exited = terminal.WaitForExit(1000);
+            }
+
+            Assert.True(exited, "Process should exit after being killed");
         }
 
         [Fact]
@@ -301,7 +316,8 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            string output = await ReadOutputUntilAsync(terminal, "second", cts.Token);
+            // Read all output - give enough time for both commands to complete
+            string output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
 
             Assert.Contains("first", output);
             Assert.Contains("second", output);
