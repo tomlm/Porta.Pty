@@ -24,9 +24,8 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         protected override bool KillCore(int fd)
         {
-            // Use SIGTERM for a graceful termination request
-            // SIGHUP may be ignored by shells, SIGTERM is the standard termination signal
-            return kill(this.Pid, SIGTERM) != -1;
+            // Use kill() directly instead of ioctl(TIOCSIG) which may not work on newer macOS versions
+            return kill(this.Pid, SIGHUP) != -1;
         }
 
         /// <inheritdoc/>

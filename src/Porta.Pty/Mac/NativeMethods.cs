@@ -205,27 +205,21 @@ namespace Porta.Pty.Mac
         [DllImport(LibSystem, SetLastError = true)]
         internal static extern int kill(int pid, int signal);
 
+        [DllImport(LibSystem, SetLastError = true)]
+        private static extern int setenv(string name, string value, int overwrite);
+
+        [DllImport(LibSystem, SetLastError = true)]
+        private static extern int unsetenv(string name);
+
         internal static void execvpe(string file, string?[] args, IDictionary<string, string> environment)
         {
-            // Build merged environment: start with current environment, then apply user overrides
-            var mergedEnv = new Dictionary<string, string>();
-
-            // First, copy all current environment variables
-            foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
-            {
-                if (entry.Key is string key && entry.Value is string value)
-                {
-                    mergedEnv[key] = value;
-                }
-            }
-
             // Set TERM if not already set (important for PTY)
-            if (!mergedEnv.ContainsKey("TERM"))
+            if (Environment.GetEnvironmentVariable("TERM") == null)
             {
-                mergedEnv["TERM"] = "xterm-256color";
+                setenv("TERM", "xterm-256color", 0);
             }
 
-            // Apply user-specified environment variables (override or add)
+            // Apply user-specified environment variables (uses setenv which modifies existing environment)
             if (environment != null)
             {
                 foreach (var kvp in environment)
@@ -233,30 +227,14 @@ namespace Porta.Pty.Mac
                     if (string.IsNullOrEmpty(kvp.Value))
                     {
                         // Empty value means remove the variable
-                        mergedEnv.Remove(kvp.Key);
+                        unsetenv(kvp.Key);
                     }
                     else
                     {
-                        mergedEnv[kvp.Key] = kvp.Value;
+                        setenv(kvp.Key, kvp.Value, 1);
                     }
                 }
             }
-
-            // Now set the merged environment
-            // As this process is going to be replaced by execvp, there is no need in freeing up the allocated memory.
-            IntPtr ppEnv = Marshal.AllocHGlobal((mergedEnv.Count + 1) * SizeOfIntPtr);
-            int offset = 0;
-            foreach (var kvp in mergedEnv)
-            {
-                IntPtr pEnv = Marshal.StringToHGlobalAnsi($"{kvp.Key}={kvp.Value}");
-                Marshal.WriteIntPtr(ppEnv, offset, pEnv);
-                offset += SizeOfIntPtr;
-            }
-
-            Marshal.WriteIntPtr(ppEnv, offset, IntPtr.Zero);
-
-            // _NSGetEnviron() is a pointer to a pointer to an array of pointers to null-terminated strings
-            Marshal.WriteIntPtr(_NSGetEnviron(), ppEnv);
 
             if (execvp(file, args) == -1)
             {
