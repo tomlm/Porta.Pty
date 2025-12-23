@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.7.34221.43
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Pty.Net", "Porta.Pty\Porta.Pty.csproj", "{BB1CB101-8B89-4019-B120-DC93F623C5AC}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Pty.Net.Tests", "Porta.Pty.Tests\Porta.Pty.Tests.csproj", "{84369542-4ED6-476C-B480-644641F3EF88}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BB1CB101-8B89-4019-B120-DC93F623C5AC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BB1CB101-8B89-4019-B120-DC93F623C5AC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BB1CB101-8B89-4019-B120-DC93F623C5AC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BB1CB101-8B89-4019-B120-DC93F623C5AC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{84369542-4ED6-476C-B480-644641F3EF88}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{84369542-4ED6-476C-B480-644641F3EF88}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{84369542-4ED6-476C-B480-644641F3EF88}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{84369542-4ED6-476C-B480-644641F3EF88}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B344460F-2077-4D98-A282-DD7082EFA766}
+	EndGlobalSection
+EndGlobal
