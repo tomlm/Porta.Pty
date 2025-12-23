@@ -72,12 +72,42 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Use duration-based reading which is more reliable with parallel test execution
-            string output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
+            // Simple synchronous read with timeout - most reliable approach
+            var buffer = new byte[4096];
+            var output = new StringBuilder();
+            var encoding = new UTF8Encoding(false);
+            var stopwatch = Stopwatch.StartNew();
+            
+            // Read for up to 5 seconds or until we get the expected output
+            while (stopwatch.ElapsedMilliseconds < 5000)
+            {
+                try
+                {
+                    // Non-blocking check if data is available would be ideal, 
+                    // but we'll use a task with timeout
+                    var readTask = Task.Run(() => terminal.ReaderStream.Read(buffer, 0, buffer.Length));
+                    
+                    if (await Task.WhenAny(readTask, Task.Delay(500)) == readTask)
+                    {
+                        int bytesRead = readTask.Result;
+                        if (bytesRead > 0)
+                        {
+                            output.Append(encoding.GetString(buffer, 0, bytesRead));
+                            if (output.ToString().Contains("test"))
+                                break;
+                        }
+                    }
+                }
+                catch
+                {
+                    break;
+                }
+            }
 
-            Assert.Contains("test", output);
+            Assert.Contains("test", output.ToString());
 
-            await CleanupTerminalAsync(terminal);
+            try { terminal.Kill(); } catch { }
+            terminal.WaitForExit(1000);
         }
 
         [Fact]
