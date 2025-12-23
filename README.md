@@ -2,9 +2,9 @@
 
 A cross-platform pseudoterminal (PTY) library for .NET that enables spawning and interacting with terminal processes on Windows, Linux, and macOS.
 
-[![Windows](https://github.com/tomlm/Porta.Pty/actions/workflows/BuildAndRunTests.yml/badge.svg?branch=main&job=build-windows)](https://github.com/tomlm/Porta.Pty/actions/workflows/BuildAndRunTests.yml)
-[![Linux](https://github.com/tomlm/Porta.Pty/actions/workflows/BuildAndRunTests.yml/badge.svg?branch=main&job=build-linux)](https://github.com/tomlm/Porta.Pty/actions/workflows/BuildAndRunTests.yml)
-[![macOS](https://github.com/tomlm/Porta.Pty/actions/workflows/BuildAndRunTests.yml/badge.svg?branch=main&job=build-macos)](https://github.com/tomlm/Porta.Pty/actions/workflows/BuildAndRunTests.yml)
+[![Windows](https://github.com/tomlm/Porta.Pty/actions/workflows/build-windows.yml/badge.svg?branch=main)](https://github.com/tomlm/Porta.Pty/actions/workflows/build-windows.yml)
+[![Linux](https://github.com/tomlm/Porta.Pty/actions/workflows/build-linux.yml/badge.svg?branch=main)](https://github.com/tomlm/Porta.Pty/actions/workflows/build-linux.yml)
+[![macOS](https://github.com/tomlm/Porta.Pty/actions/workflows/build-macos.yml/badge.svg?branch=main)](https://github.com/tomlm/Porta.Pty/actions/workflows/build-macos.yml)
 
 ## Features
 

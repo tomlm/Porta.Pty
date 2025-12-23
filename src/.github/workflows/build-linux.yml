@@ -1,0 +1,39 @@
+name: Linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+    - src/**
+    - .github/workflows/**
+  pull_request:
+    branches: [ "main" ]
+    paths:
+    - src/**
+    - .github/workflows/**
+    
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Porta.Pty.sln
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore src/Porta.Pty.sln
+
+    - name: Build
+      run: dotnet build --no-restore src/Porta.Pty.sln --property WarningLevel=0
+      
+    - name: Test
+      run: dotnet test --no-build --verbosity normal src/Porta.Pty.sln
+      env:
+        DOTNET_EnableWriteXorExecute: 0
