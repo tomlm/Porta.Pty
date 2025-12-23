@@ -6,6 +6,7 @@ namespace Porta.Pty.Mac
     using System;
     using System.Collections.Generic;
     using System.Diagnostics;
+    using System.Linq;
     using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
@@ -19,6 +20,33 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         public override Task<IPtyConnection> StartTerminalAsync(PtyOptions options, TraceSource trace, CancellationToken cancellationToken)
         {
+            // Check DOTNET_EnableWriteXorExecute on macOS.
+            // This is required for .NET 7+ due to W^X security policy that conflicts with forkpty.
+            var dotnetEnableWriteXorExecute = Environment.GetEnvironmentVariable("DOTNET_EnableWriteXorExecute");
+
+            bool requiresDisabledWxorX = false;
+            try
+            {
+                var frameworkDescription = RuntimeInformation.FrameworkDescription; // e.g., ".NET 8.0.0"
+                var versionPart = frameworkDescription.Split(' ').LastOrDefault();
+                if (versionPart != null && Version.TryParse(versionPart, out var runtimeVersion))
+                {
+                    requiresDisabledWxorX = runtimeVersion.Major >= 7;
+                }
+            }
+            catch
+            {
+                // If we can't parse the version, assume we need the flag for safety
+                requiresDisabledWxorX = true;
+            }
+
+            if (requiresDisabledWxorX && dotnetEnableWriteXorExecute != "0")
+            {
+                throw new ApplicationException(
+                    "You must set environment variable DOTNET_EnableWriteXorExecute=0 to use PTY on macOS with .NET 7+. " +
+                    "Run: export DOTNET_EnableWriteXorExecute=0");
+            }
+
             var winSize = new WinSize((ushort)options.Rows, (ushort)options.Cols);
 
             string?[] terminalArgs = GetExecvpArgs(options);

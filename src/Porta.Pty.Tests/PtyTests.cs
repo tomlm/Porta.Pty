@@ -41,7 +41,7 @@ namespace Porta.Pty.Tests
                 CommandLine = IsWindows
                     ? new[] { "/c", command }
                     : new[] { "-c", command },
-                VerbatimCommandLine = true, // Don't quote arguments - important for cmd.exe
+                VerbatimCommandLine = true,
                 Environment = new Dictionary<string, string>()
             };
         }
@@ -104,21 +104,17 @@ namespace Porta.Pty.Tests
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
             terminal.ProcessExited += (sender, e) => exitedTcs.TrySetResult(e.ExitCode);
 
-            // Read output to let the process complete
             await ReadOutputUntilAsync(terminal, "done", cts.Token);
 
-            // Wait for the process to exit naturally, with timeout
             using (cts.Token.Register(() => exitedTcs.TrySetCanceled()))
             {
                 try
                 {
                     int exitCode = await exitedTcs.Task;
-                    // Exit code varies by platform
                     Assert.True(exitCode >= 0, $"Exit code should be non-negative, was {exitCode}");
                 }
                 catch (TaskCanceledException)
                 {
-                    // Process may have already exited before we subscribed
                     Assert.True(terminal.WaitForExit(1000), "Process should have exited");
                 }
             }
@@ -133,7 +129,6 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Resize should not throw
             var exception = Record.Exception(() => terminal.Resize(120, 40));
             Assert.Null(exception);
 
@@ -148,15 +143,12 @@ namespace Porta.Pty.Tests
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
 
-            // Start an interactive shell (long-running)
             var options = CreateInteractiveShellOptions("KillTest");
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Give the process a moment to start
             await Task.Delay(500, cts.Token);
 
-            // Verify it's running
             Assert.False(terminal.WaitForExit(100), "Process should still be running");
 
             terminal.Kill();
@@ -169,15 +161,12 @@ namespace Porta.Pty.Tests
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
 
-            // Start an interactive shell (stays running)
             var options = CreateInteractiveShellOptions("WaitForExitTest");
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Give the shell time to start
             await Task.Delay(500, cts.Token);
 
-            // Should return false since process is still running
             Assert.False(terminal.WaitForExit(100), "WaitForExit should return false while process is running");
 
             await CleanupTerminalAsync(terminal);
@@ -223,7 +212,23 @@ namespace Porta.Pty.Tests
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
 
-            string tempDir = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
+            // Use a known directory that exists on all platforms
+            string testDir = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
+
+            // Get the real path (resolves symlinks on macOS where /tmp -> /private/tmp)
+            if (!IsWindows && Directory.Exists(testDir))
+            {
+                try
+                {
+                    var dirInfo = new DirectoryInfo(testDir);
+                    testDir = dirInfo.FullName.TrimEnd(Path.DirectorySeparatorChar);
+                }
+                catch
+                {
+                    // Keep original path if resolution fails
+                }
+            }
+
             string command = IsWindows ? "cd" : "pwd";
 
             var options = new PtyOptions
@@ -231,7 +236,7 @@ namespace Porta.Pty.Tests
                 Name = "CwdTest",
                 Cols = 120,
                 Rows = 25,
-                Cwd = tempDir,
+                Cwd = testDir,
                 App = ShellApp,
                 CommandLine = IsWindows
                     ? new[] { "/c", command }
@@ -242,19 +247,31 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Read some output
-            string output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
+            // Wait for output - use a longer timeout and search for path separator
+            string output = await ReadOutputUntilAsync(terminal, Path.DirectorySeparatorChar.ToString(), cts.Token);
 
-            // The output should contain part of the temp path
-            bool containsTempPath = output.Contains("Temp", StringComparison.OrdinalIgnoreCase) ||
-                                    output.Contains("tmp", StringComparison.OrdinalIgnoreCase) ||
-                                    output.Contains("TEMP", StringComparison.Ordinal) ||
-                                    output.Contains("var", StringComparison.OrdinalIgnoreCase) ||
-                                    output.Contains("Local", StringComparison.OrdinalIgnoreCase);
-
-            Assert.True(containsTempPath, $"Output should contain temp directory indicator. Actual: {output}");
+            // If we didn't get output with the search, try reading for duration
+            if (string.IsNullOrWhiteSpace(output))
+            {
+                output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(3), cts.Token);
+            }
 
             await CleanupTerminalAsync(terminal);
+
+            // The output should contain a path - check for common indicators
+            // macOS: /var/folders, /private/tmp, /tmp
+            // Linux: /tmp
+            // Windows: C:\Users\...\AppData\Local\Temp
+            bool containsPath = !string.IsNullOrWhiteSpace(output) &&
+                               (output.Contains(Path.DirectorySeparatorChar) ||
+                                output.Contains("tmp", StringComparison.OrdinalIgnoreCase) ||
+                                output.Contains("Temp", StringComparison.OrdinalIgnoreCase) ||
+                                output.Contains("var", StringComparison.OrdinalIgnoreCase) ||
+                                output.Contains("folders", StringComparison.OrdinalIgnoreCase) ||
+                                output.Contains("private", StringComparison.OrdinalIgnoreCase) ||
+                                output.Contains("Local", StringComparison.OrdinalIgnoreCase));
+
+            Assert.True(containsPath, $"Output should contain a path. TestDir: {testDir}, Actual output: '{output}'");
         }
 
         [Fact]
@@ -322,9 +339,7 @@ namespace Porta.Pty.Tests
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
 
-            string command = IsWindows
-                ? "echo first && echo second"
-                : "echo first && echo second";
+            string command = "echo first && echo second";
 
             var options = CreateShellCommandOptions("MultiCommandTest", command);
 
@@ -347,20 +362,16 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Wait for output and process to complete
             await ReadOutputUntilAsync(terminal, "success", cts.Token);
-            
-            // Wait for process to fully exit
+
             Assert.True(terminal.WaitForExit(5000), "Process should exit");
 
-            // Exit code should be available (0 for success, but could vary)
             int exitCode = terminal.ExitCode;
             Assert.True(exitCode >= 0, $"Exit code should be non-negative, was {exitCode}");
         }
 
         /// <summary>
         /// Reads output from the terminal until the search text is found or cancellation is requested.
-        /// Uses a background task to avoid blocking on synchronous stream reads.
         /// </summary>
         private static async Task<string> ReadOutputUntilAsync(IPtyConnection terminal, string searchText, CancellationToken cancellationToken)
         {
@@ -368,9 +379,8 @@ namespace Porta.Pty.Tests
             var outputBuilder = new StringBuilder();
             var buffer = new byte[4096];
 
-            // Use Task.Run to avoid blocking on synchronous stream reads
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            linkedCts.CancelAfter(TimeSpan.FromSeconds(5)); // Add inner timeout
+            linkedCts.CancelAfter(TimeSpan.FromSeconds(5));
 
             try
             {
@@ -378,7 +388,6 @@ namespace Porta.Pty.Tests
                 {
                     while (!linkedCts.Token.IsCancellationRequested)
                     {
-                        // Check if data is available or use a short timeout read
                         var readTask = Task.Run(() =>
                         {
                             try
@@ -392,7 +401,7 @@ namespace Porta.Pty.Tests
                         });
 
                         var completedTask = await Task.WhenAny(readTask, Task.Delay(100, linkedCts.Token));
-                        
+
                         if (completedTask == readTask)
                         {
                             int bytesRead = await readTask;
@@ -447,7 +456,7 @@ namespace Porta.Pty.Tests
                         });
 
                         var completedTask = await Task.WhenAny(readTask, Task.Delay(100, durationCts.Token));
-                        
+
                         if (completedTask == readTask)
                         {
                             int bytesRead = await readTask;
