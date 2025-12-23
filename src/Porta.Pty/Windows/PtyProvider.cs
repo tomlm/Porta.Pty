@@ -280,34 +280,46 @@ namespace Porta.Pty.Windows
                     }
                     finally
                     {
-                        // Call the Win32 CreateProcess
-                        var processInfoRaw = new PROCESS_INFORMATION();
-                        success = CreateProcessW(
-                            null!,   // lpApplicationName
-                            commandLine.ToString(),
-                            IntPtr.Zero,   // lpProcessAttributes
-                            IntPtr.Zero,   // lpThreadAttributes
-                            false,  // bInheritHandles VERY IMPORTANT that this is false
-                            (uint)(CREATE_PROCESS.EXTENDED_STARTUPINFO_PRESENT | CREATE_PROCESS.CREATE_UNICODE_ENVIRONMENT), // dwCreationFlags
-                            IntPtr.Zero,   // lpEnvironment
-                            options.Cwd,
-                            ref startupInfo,
-                            out processInfoRaw);
-
-                        if (success)
+                        // Build the environment block from the options
+                        string environmentBlock = GetEnvironmentString(options.Environment);
+                        
+                        // Pin the environment string and get a pointer to it
+                        var environmentHandle = GCHandle.Alloc(Encoding.Unicode.GetBytes(environmentBlock), GCHandleType.Pinned);
+                        try
                         {
-                            // Create Vanara safe handles from raw handles
-                            var hProcessPtr = (IntPtr)processInfoRaw.hProcess.DangerousGetHandle();
-                            var hThreadPtr = (IntPtr)processInfoRaw.hThread.DangerousGetHandle();
-                            
-                            processHandle = new SafeHPROCESS(hProcessPtr, true);
-                            mainThreadHandle = new SafeHTHREAD(hThreadPtr, true);
-                            pid = (int)processInfoRaw.dwProcessId;
+                            // Call the Win32 CreateProcess
+                            var processInfoRaw = new PROCESS_INFORMATION();
+                            success = CreateProcessW(
+                                null!,   // lpApplicationName
+                                commandLine.ToString(),
+                                IntPtr.Zero,   // lpProcessAttributes
+                                IntPtr.Zero,   // lpThreadAttributes
+                                false,  // bInheritHandles VERY IMPORTANT that this is false
+                                (uint)(CREATE_PROCESS.EXTENDED_STARTUPINFO_PRESENT | CREATE_PROCESS.CREATE_UNICODE_ENVIRONMENT), // dwCreationFlags
+                                environmentHandle.AddrOfPinnedObject(),   // lpEnvironment - pass the environment block
+                                options.Cwd,
+                                ref startupInfo,
+                                out processInfoRaw);
 
-                            // Assign the process to the job object immediately after creation.
-                            // This ensures the process and any children it spawns will be terminated
-                            // when the job handle is closed (e.g., when our terminal crashes).
-                            JobObject.AssignProcess(jobObjectHandle, hProcessPtr);
+                            if (success)
+                            {
+                                // Create Vanara safe handles from raw handles
+                                var hProcessPtr = (IntPtr)processInfoRaw.hProcess.DangerousGetHandle();
+                                var hThreadPtr = (IntPtr)processInfoRaw.hThread.DangerousGetHandle();
+                                
+                                processHandle = new SafeHPROCESS(hProcessPtr, true);
+                                mainThreadHandle = new SafeHTHREAD(hThreadPtr, true);
+                                pid = (int)processInfoRaw.dwProcessId;
+
+                                // Assign the process to the job object immediately after creation.
+                                // This ensures the process and any children it spawns will be terminated
+                                // when the job handle is closed (e.g., when our terminal crashes).
+                                JobObject.AssignProcess(jobObjectHandle, hProcessPtr);
+                            }
+                        }
+                        finally
+                        {
+                            environmentHandle.Free();
                         }
                     }
 
