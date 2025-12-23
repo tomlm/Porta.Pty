@@ -298,7 +298,7 @@ namespace Porta.Pty.Tests
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
 
-            var options = CreateShellCommandOptions("ExitCodeTest", "echo success");
+            var options = CreateShellCommandOptions("ExitCodeTest", "echo success & exit");
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
