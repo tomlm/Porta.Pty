@@ -9,7 +9,6 @@ namespace Porta.Pty.Tests
     using System.IO;
     using System.Runtime.InteropServices;
     using System.Text;
-    using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
     using Xunit;
@@ -72,41 +71,12 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Simple synchronous read with timeout - most reliable approach
-            var buffer = new byte[4096];
-            var output = new StringBuilder();
-            var encoding = new UTF8Encoding(false);
-            var stopwatch = Stopwatch.StartNew();
+            // Read output until we find expected text or timeout
+            string output = await ReadOutputAsync(terminal, "test", TimeSpan.FromSeconds(5));
+
+            Assert.Contains("test", output);
             
-            // Read for up to 5 seconds or until we get the expected output
-            while (stopwatch.ElapsedMilliseconds < 5000)
-            {
-                try
-                {
-                    // Non-blocking check if data is available would be ideal, 
-                    // but we'll use a task with timeout
-                    var readTask = Task.Run(() => terminal.ReaderStream.Read(buffer, 0, buffer.Length));
-                    
-                    if (await Task.WhenAny(readTask, Task.Delay(500)) == readTask)
-                    {
-                        int bytesRead = readTask.Result;
-                        if (bytesRead > 0)
-                        {
-                            output.Append(encoding.GetString(buffer, 0, bytesRead));
-                            if (output.ToString().Contains("test"))
-                                break;
-                        }
-                    }
-                }
-                catch
-                {
-                    break;
-                }
-            }
-
-            Assert.Contains("test", output.ToString());
-
-            try { terminal.Kill(); } catch { }
+            // Command completes naturally, just wait for exit - no Kill() needed
             terminal.WaitForExit(1000);
         }
 
@@ -120,8 +90,9 @@ namespace Porta.Pty.Tests
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
             Assert.True(terminal.Pid > 0, "Process ID should be greater than zero");
-
-            await CleanupTerminalAsync(terminal);
+            
+            // Command completes naturally
+            terminal.WaitForExit(1000);
         }
 
         [Fact]
@@ -135,8 +106,10 @@ namespace Porta.Pty.Tests
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
             terminal.ProcessExited += (sender, e) => exitedTcs.TrySetResult(e.ExitCode);
 
-            await ReadOutputUntilAsync(terminal, "done", cts.Token);
+            // Read to ensure command runs
+            await ReadOutputAsync(terminal, "done", TimeSpan.FromSeconds(5));
 
+            // Wait for the exit event or timeout
             using (cts.Token.Register(() => exitedTcs.TrySetCanceled()))
             {
                 try
@@ -166,10 +139,10 @@ namespace Porta.Pty.Tests
             exception = Record.Exception(() => terminal.Resize(40, 10));
             Assert.Null(exception);
 
-            await CleanupTerminalAsync(terminal);
+            terminal.WaitForExit(1000);
         }
 
-        [Fact(Skip ="Not reliable on server")]
+        [Fact(Skip = "Not reliable on CI server")]
         public async Task Kill_TerminatesProcess()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -178,17 +151,13 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Wait a bit for the shell to start
             await Task.Delay(500, cts.Token);
 
             Assert.False(terminal.WaitForExit(100), "Process should still be running");
 
             terminal.Kill();
 
-            // Give time for the process to fully terminate
-            // The polling WaitPid should detect termination quickly
             bool exited = terminal.WaitForExit(5000);
-
             Assert.True(exited, "Process should exit after being killed");
         }
 
@@ -204,8 +173,10 @@ namespace Porta.Pty.Tests
             await Task.Delay(500, cts.Token);
 
             Assert.False(terminal.WaitForExit(100), "WaitForExit should return false while process is running");
-
-            await CleanupTerminalAsync(terminal);
+            
+            // Interactive shell - Kill is appropriate here since it won't exit on its own
+            terminal.Kill();
+            terminal.WaitForExit(1000);
         }
 
         [Fact]
@@ -236,34 +207,30 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            string output = await ReadOutputUntilAsync(terminal, "custom_value_12345", cts.Token);
+            string output = await ReadOutputAsync(terminal, "custom_value_12345", TimeSpan.FromSeconds(5));
 
             Assert.Contains("custom_value_12345", output);
-
-            await CleanupTerminalAsync(terminal);
+            
+            terminal.WaitForExit(1000);
         }
 
-        [Fact(Skip ="Not reliable on server")]
+        [Fact(Skip = "Not reliable on CI server")]
         public async Task WorkingDirectory_IsRespected()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
 
-            // Just run pwd and verify we get some path output
-            // Use the current directory which we know works (EchoTest passes)
             string command = IsWindows ? "cd" : "pwd";
 
             var options = CreateShellCommandOptions("CwdTest", command);
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            // Read output looking for a path separator
-            string output = await ReadOutputUntilAsync(terminal, IsWindows ? "\\" : "/", cts.Token);
+            string output = await ReadOutputAsync(terminal, IsWindows ? "\\" : "/", TimeSpan.FromSeconds(5));
 
-            await CleanupTerminalAsync(terminal);
-
-            // Verify we got a path in the output
             Assert.True(output.Contains(Path.DirectorySeparatorChar), 
                 $"Output should contain path separator. Actual output: '{output}'");
+                
+            terminal.WaitForExit(1000);
         }
 
         [Fact]
@@ -335,13 +302,7 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            await ReadOutputUntilAsync(terminal, "success", cts.Token);
-
-            // Give the process a moment to fully exit after output
-            await Task.Delay(500, cts.Token);
-
-            // Drain any remaining output
-            await ReadOutputForDurationAsync(terminal, TimeSpan.FromMilliseconds(500), cts.Token);
+            await ReadOutputAsync(terminal, "success", TimeSpan.FromSeconds(5));
 
             Assert.True(terminal.WaitForExit(5000), "Process should exit");
 
@@ -350,127 +311,39 @@ namespace Porta.Pty.Tests
         }
 
         /// <summary>
-        /// Reads output from the terminal until the search text is found or cancellation is requested.
+        /// Reads output from the terminal until the search text is found or timeout.
         /// </summary>
-        private static async Task<string> ReadOutputUntilAsync(IPtyConnection terminal, string searchText, CancellationToken cancellationToken)
+        private static async Task<string> ReadOutputAsync(IPtyConnection terminal, string searchText, TimeSpan timeout)
         {
-            var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-            var outputBuilder = new StringBuilder();
             var buffer = new byte[4096];
+            var output = new StringBuilder();
+            var encoding = new UTF8Encoding(false);
+            var stopwatch = Stopwatch.StartNew();
 
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            linkedCts.CancelAfter(TimeSpan.FromSeconds(5));
-
-            try
+            while (stopwatch.Elapsed < timeout)
             {
-                await Task.Run(async () =>
+                try
                 {
-                    while (!linkedCts.Token.IsCancellationRequested)
+                    var readTask = Task.Run(() => terminal.ReaderStream.Read(buffer, 0, buffer.Length));
+
+                    if (await Task.WhenAny(readTask, Task.Delay(500)) == readTask)
                     {
-                        var readTask = Task.Run(() =>
+                        int bytesRead = readTask.Result;
+                        if (bytesRead > 0)
                         {
-                            try
-                            {
-                                return terminal.ReaderStream.Read(buffer, 0, buffer.Length);
-                            }
-                            catch
-                            {
-                                return 0;
-                            }
-                        });
-
-                        var completedTask = await Task.WhenAny(readTask, Task.Delay(100, linkedCts.Token));
-
-                        if (completedTask == readTask)
-                        {
-                            int bytesRead = await readTask;
-                            if (bytesRead == 0)
-                                break;
-
-                            string chunk = encoding.GetString(buffer, 0, bytesRead);
-                            outputBuilder.Append(chunk);
-
-                            if (outputBuilder.ToString().Contains(searchText))
+                            output.Append(encoding.GetString(buffer, 0, bytesRead));
+                            if (output.ToString().Contains(searchText))
                                 break;
                         }
                     }
-                }, linkedCts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                // Timeout or cancellation is acceptable
-            }
-
-            return outputBuilder.ToString();
-        }
-
-        /// <summary>
-        /// Reads output from the terminal for a specified duration.
-        /// </summary>
-        private static async Task<string> ReadOutputForDurationAsync(IPtyConnection terminal, TimeSpan duration, CancellationToken cancellationToken)
-        {
-            var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-            var outputBuilder = new StringBuilder();
-            var buffer = new byte[4096];
-
-            using var durationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            durationCts.CancelAfter(duration);
-
-            try
-            {
-                await Task.Run(async () =>
+                }
+                catch
                 {
-                    while (!durationCts.Token.IsCancellationRequested)
-                    {
-                        var readTask = Task.Run(() =>
-                        {
-                            try
-                            {
-                                return terminal.ReaderStream.Read(buffer, 0, buffer.Length);
-                            }
-                            catch
-                            {
-                                return 0;
-                            }
-                        });
-
-                        var completedTask = await Task.WhenAny(readTask, Task.Delay(100, durationCts.Token));
-
-                        if (completedTask == readTask)
-                        {
-                            int bytesRead = await readTask;
-                            if (bytesRead == 0)
-                                break;
-
-                            string chunk = encoding.GetString(buffer, 0, bytesRead);
-                            outputBuilder.Append(chunk);
-                        }
-                    }
-                }, durationCts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                // Duration elapsed - this is expected
+                    break;
+                }
             }
 
-            return outputBuilder.ToString();
-        }
-
-        /// <summary>
-        /// Safely cleans up a terminal connection.
-        /// </summary>
-        private static async Task CleanupTerminalAsync(IPtyConnection terminal)
-        {
-            try
-            {
-                terminal.Kill();
-            }
-            catch
-            {
-                // Process may have already exited
-            }
-
-            await Task.Run(() => terminal.WaitForExit(2000));
+            return output.ToString();
         }
     }
 }
