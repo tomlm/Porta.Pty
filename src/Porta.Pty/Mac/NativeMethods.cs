@@ -19,6 +19,8 @@ namespace Porta.Pty.Mac
         internal const uint TIOCSIG = 0x2000_745F;
         internal const ulong TIOCSWINSZ = 0x8008_7467;
         internal const int SIGHUP = 1;
+        internal const int SIGTERM = 15;
+        internal const int SIGKILL = 9;
 
         private const string LibSystem = "libSystem.dylib";
 
