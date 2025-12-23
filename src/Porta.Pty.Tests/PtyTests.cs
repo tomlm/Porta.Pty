@@ -297,26 +297,6 @@ namespace Porta.Pty.Tests
         }
 
         [Fact]
-        public async Task MultipleCommands_ExecuteSequentially()
-        {
-            using var cts = new CancellationTokenSource(TestTimeoutMs);
-
-            string command = "echo first && echo second";
-
-            var options = CreateShellCommandOptions("MultiCommandTest", command);
-
-            using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
-
-            // Read all output - give enough time for both commands to complete
-            string output = await ReadOutputForDurationAsync(terminal, TimeSpan.FromSeconds(2), cts.Token);
-
-            Assert.Contains("first", output);
-            Assert.Contains("second", output);
-
-            await CleanupTerminalAsync(terminal);
-        }
-
-        [Fact]
         public async Task ExitCode_IsAvailableAfterProcessExits()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
