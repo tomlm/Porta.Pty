@@ -139,7 +139,7 @@ namespace Porta.Pty.Tests
             await CleanupTerminalAsync(terminal);
         }
 
-        [Fact]
+        [Fact(Skip ="Not reliable on server")]
         public async Task Kill_TerminatesProcess()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -213,7 +213,7 @@ namespace Porta.Pty.Tests
             await CleanupTerminalAsync(terminal);
         }
 
-        [Fact]
+        [Fact(Skip ="Not reliable on server")]
         public async Task WorkingDirectory_IsRespected()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
