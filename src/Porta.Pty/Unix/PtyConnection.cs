@@ -16,12 +16,14 @@ namespace Porta.Pty.Unix
     {
         private const int EINTR = 4;
         private const int ECHILD = 10;
+        private const int ESRCH = 3;
 
         private readonly int controller;
         private readonly int pid;
         private readonly ManualResetEvent terminalProcessTerminatedEvent = new ManualResetEvent(false);
         private int exitCode;
         private int exitSignal;
+        private bool isDisposed;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="PtyConnection"/> class.
@@ -63,9 +65,18 @@ namespace Porta.Pty.Unix
         /// <inheritdoc/>
         public void Dispose()
         {
+            if (this.isDisposed)
+            {
+                return;
+            }
+
+            this.isDisposed = true;
+
             this.ReaderStream?.Dispose();
             this.WriterStream?.Dispose();
-            this.Kill();
+
+            // Try to kill the process, but don't throw if it already exited
+            this.TryKill();
         }
 
         /// <inheritdoc/>
@@ -73,7 +84,12 @@ namespace Porta.Pty.Unix
         {
             if (!this.Kill(this.controller))
             {
-                throw new InvalidOperationException($"Killing terminal failed with error {Marshal.GetLastWin32Error()}");
+                int errno = Marshal.GetLastWin32Error();
+                // ESRCH means the process doesn't exist (already exited) - that's OK
+                if (errno != ESRCH)
+                {
+                    throw new InvalidOperationException($"Killing terminal failed with error {errno}");
+                }
             }
         }
 
@@ -115,6 +131,21 @@ namespace Porta.Pty.Unix
         /// <param name="status">The status of the process.</param>
         /// <returns>True if the function succeeded to get the status of the process, false otherwise.</returns>
         protected abstract bool WaitPid(int pid, ref int status);
+
+        /// <summary>
+        /// Attempts to kill the process without throwing an exception.
+        /// </summary>
+        private void TryKill()
+        {
+            try
+            {
+                this.Kill();
+            }
+            catch
+            {
+                // Ignore errors during cleanup - process may have already exited
+            }
+        }
 
         private void ChildWatcherThreadProc()
         {
