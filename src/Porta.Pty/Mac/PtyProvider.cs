@@ -6,6 +6,7 @@ namespace Porta.Pty.Mac
     using System;
     using System.Collections.Generic;
     using System.Diagnostics;
+    using System.Linq;
     using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
@@ -19,9 +20,19 @@ namespace Porta.Pty.Mac
         /// <inheritdoc/>
         public override Task<IPtyConnection> StartTerminalAsync(PtyOptions options, TraceSource trace, CancellationToken cancellationToken)
         {
-            var winSize = new WinSize((ushort)options.Rows, (ushort)options.Cols);
+            var winSize = new PtyWinSize((ushort)options.Rows, (ushort)options.Cols);
 
             string?[] terminalArgs = GetExecvpArgs(options);
+
+            // Convert environment dictionary to "KEY=VALUE" string array for native code
+            string?[]? envp = null;
+            if (options.Environment != null && options.Environment.Count > 0)
+            {
+                envp = options.Environment
+                    .Select(kvp => $"{kvp.Key}={kvp.Value}")
+                    .Concat(new string?[] { null }) // NULL-terminated
+                    .ToArray();
+            }
 
             var controlCharacters = new Dictionary<TermSpecialControlCharacter, sbyte>
             {
@@ -45,7 +56,7 @@ namespace Porta.Pty.Mac
                 { TermSpecialControlCharacter.VSTATUS, 20 },
             };
 
-            var term = new Termios(
+            var term = new PtyTermios(
                 inputFlag: TermInputFlag.ICRNL | TermInputFlag.IXON | TermInputFlag.IXANY | TermInputFlag.IMAXBEL | TermInputFlag.BRKINT | TermInputFlag.IUTF8,
                 outputFlag: TermOuptutFlag.OPOST | TermOuptutFlag.ONLCR,
                 controlFlag: TermConrolFlag.CREAD | TermConrolFlag.CS8 | TermConrolFlag.HUPCL,
@@ -53,26 +64,36 @@ namespace Porta.Pty.Mac
                 speed: TermSpeed.B38400,
                 controlCharacters: controlCharacters);
 
-            int controller = 0;
-            int pid = forkpty(ref controller, null, ref term, ref winSize);
+            // Use native shim to spawn process - this avoids W^X issues
+            // by performing fork+exec entirely in native code
+            var result = pty_spawn(
+                options.App,
+                terminalArgs,
+                envp,
+                options.Cwd,
+                ref term,
+                ref winSize);
 
-            if (pid == -1)
+            if (result.Pid == -1)
             {
-                throw new InvalidOperationException($"forkpty(4) failed with error {Marshal.GetLastWin32Error()}");
+                throw new InvalidOperationException(
+                    $"pty_spawn failed with error {result.Error}: {GetErrorMessage(result.Error)}");
             }
 
-            if (pid == 0)
+            return Task.FromResult<IPtyConnection>(new PtyConnection(result.MasterFd, result.Pid));
+        }
+
+        private static string GetErrorMessage(int errno)
+        {
+            // Common errno values
+            return errno switch
             {
-                // We are in a forked process! See http://man7.org/linux/man-pages/man2/fork.2.html for details.
-                // Only our thread is running. We inherited open file descriptors and get a copy of the parent process memory.
-                Environment.CurrentDirectory = options.Cwd;
-                execvpe(options.App, terminalArgs, options.Environment);
-
-                // Unreachable code after execvpe()
-            }
-
-            // We have forked the terminal
-            return Task.FromResult<IPtyConnection>(new PtyConnection(controller, pid));
+                1 => "EPERM (Operation not permitted)",
+                2 => "ENOENT (No such file or directory)",
+                12 => "ENOMEM (Cannot allocate memory)",
+                13 => "EACCES (Permission denied)",
+                _ => $"errno {errno}"
+            };
         }
     }
 }

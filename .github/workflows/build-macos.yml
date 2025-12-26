@@ -27,13 +27,33 @@ jobs:
       with:
         dotnet-version: 10.0.x
 
+    - name: Build native PTY shim (both architectures)
+      run: |
+        cd src/Porta.Pty.Native
+        chmod +x build.sh
+        ./build.sh
+
+    - name: Determine runtime ID
+      id: rid
+      run: |
+        if [[ $(uname -m) == "arm64" ]]; then
+          echo "rid=osx-arm64" >> $GITHUB_OUTPUT
+        else
+          echo "rid=osx-x64" >> $GITHUB_OUTPUT
+        fi
+
     - name: Restore dependencies
       run: dotnet restore src/Porta.Pty.sln
 
     - name: Build
       run: dotnet build --no-restore src/Porta.Pty.sln --property WarningLevel=0
-      
+
+    - name: Copy native library for tests
+      run: |
+        RID=${{ steps.rid.outputs.rid }}
+        # Copy to a location the runtime can find for tests
+        cp src/Porta.Pty.Native/output/runtimes/${RID}/native/libporta_pty.dylib \
+           src/Porta.Pty.Tests/bin/Debug/net6.0/ || true
+
     - name: Test
       run: dotnet test --no-build --verbosity normal src/Porta.Pty.sln
-      env:
-        DOTNET_EnableWriteXorExecute: 0

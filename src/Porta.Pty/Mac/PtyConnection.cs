@@ -3,6 +3,7 @@
 
 namespace Porta.Pty.Mac
 {
+    using System.Threading;
     using static Porta.Pty.Mac.NativeMethods;
 
     /// <summary>
@@ -21,22 +22,32 @@ namespace Porta.Pty.Mac
         }
 
         /// <inheritdoc/>
-        protected override bool Kill(int fd)
+        protected override bool Kill(int controller)
         {
-            return ioctl(fd, TIOCSIG, SIGHUP) != -1;
+            // First try SIGHUP (standard terminal hangup signal)
+            // This is the proper signal for terminal processes
+            bool result = pty_kill(this.Pid, SIGHUP) != -1;
+            
+            // Give a brief moment for graceful shutdown
+            Thread.Sleep(100);
+            
+            // Then send SIGKILL to ensure termination (cannot be caught or ignored)
+            pty_kill(this.Pid, SIGKILL);
+            
+            return result;
         }
 
         /// <inheritdoc/>
-        protected override bool Resize(int fd, int cols, int rows)
+        protected override bool Resize(int controller, int cols, int rows)
         {
-            var size = new WinSize((ushort)rows, (ushort)cols);
-            return ioctl(fd, TIOCSWINSZ, ref size) != -1;
+            return pty_resize(controller, (ushort)rows, (ushort)cols) != -1;
         }
 
         /// <inheritdoc/>
         protected override bool WaitPid(int pid, ref int status)
         {
-            return waitpid(pid, ref status, 0) != -1;
+            // Use blocking waitpid - the background thread will wait for the process to exit
+            return pty_waitpid(pid, ref status, 0) != -1;
         }
     }
 }

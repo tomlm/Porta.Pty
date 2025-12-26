@@ -4,17 +4,125 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # Build native shim on Linux x64
+  build-native-linux-x64:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Build native PTY shim
+        run: |
+          cd src/Porta.Pty.Native
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x64
+          path: src/Porta.Pty.Native/output/runtimes/linux-x64/native/libporta_pty.so
+
+  # Build native shim on Linux ARM64
+  build-native-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Build native PTY shim
+        run: |
+          cd src/Porta.Pty.Native
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-arm64
+          path: src/Porta.Pty.Native/output/runtimes/linux-arm64/native/libporta_pty.so
+
+  # Build native shim on macOS (builds BOTH x64 and arm64 via cross-compilation)
+  build-native-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v4
+
+      - name: Build native PTY shim (both architectures)
+        run: |
+          cd src/Porta.Pty.Native
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Upload macOS ARM64 native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-osx-arm64
+          path: src/Porta.Pty.Native/output/runtimes/osx-arm64/native/libporta_pty.dylib
+
+      - name: Upload macOS x64 native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-osx-x64
+          path: src/Porta.Pty.Native/output/runtimes/osx-x64/native/libporta_pty.dylib
+
+  # Package and publish NuGet
+  package-and-publish:
+    runs-on: ubuntu-latest
+    needs: 
+      - build-native-linux-x64
+      - build-native-linux-arm64
+      - build-native-macos
     steps:
       - name: Checkout 
         uses: actions/checkout@v4
   
       - name: Setup .NET
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-  
+
+      # Download all native libraries
+      - name: Download Linux x64 native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x64
+          path: src/Porta.Pty.Native/output/runtimes/linux-x64/native/
+
+      - name: Download Linux ARM64 native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-arm64
+          path: src/Porta.Pty.Native/output/runtimes/linux-arm64/native/
+
+      - name: Download macOS ARM64 native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-osx-arm64
+          path: src/Porta.Pty.Native/output/runtimes/osx-arm64/native/
+
+      - name: Download macOS x64 native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-osx-x64
+          path: src/Porta.Pty.Native/output/runtimes/osx-x64/native/
+
+      - name: List native libraries
+        run: |
+          echo "Native libraries included in package:"
+          find src/Porta.Pty.Native/output/runtimes -type f -name "*.so" -o -name "*.dylib"
+
       - name: Restore dependencies
         run: dotnet restore src/Porta.Pty.sln
 
@@ -25,6 +133,11 @@ jobs:
         run: |
           dotnet pack --no-build src/Porta.Pty.sln -c Release -o packages --include-symbols --property WarningLevel=0
 
+      - name: List package contents
+        run: |
+          echo "Package contents:"
+          unzip -l packages/*.nupkg | grep -E "(runtimes|\.so|\.dylib)"
+
       - name: Publish NuGet and symbols
         id: nuget-push
         uses: edumserrano/nuget-push@v1
@@ -32,4 +145,3 @@ jobs:
           api-key: '${{ secrets.NUGET_KEY }}' 
           working-directory: 'packages'
           fail-if-exists: false
-        

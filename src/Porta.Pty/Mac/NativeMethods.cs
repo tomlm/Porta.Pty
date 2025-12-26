@@ -6,7 +6,6 @@ namespace Porta.Pty.Mac
     using System;
     using System.Collections.Generic;
     using System.Runtime.InteropServices;
-    using System.Text;
 
     /// <summary>
     /// Defines native types and methods for interop with Mac OS system APIs.
@@ -14,15 +13,16 @@ namespace Porta.Pty.Mac
     internal static class NativeMethods
     {
         internal const int STDIN_FILENO = 0;
-        internal const int TCSANOW = 0;
 
-        internal const uint TIOCSIG = 0x2000_745F;
         internal const ulong TIOCSWINSZ = 0x8008_7467;
         internal const int SIGHUP = 1;
+        internal const int SIGTERM = 15;
+        internal const int SIGKILL = 9;
 
-        private const string LibSystem = "libSystem.dylib";
+        // waitpid options
+        internal const int WNOHANG = 1;
 
-        private static readonly int SizeOfIntPtr = Marshal.SizeOf(typeof(IntPtr));
+        private const string LibPortaPty = "libporta_pty";
 
         public enum TermSpeed : uint
         {
@@ -177,83 +177,69 @@ namespace Porta.Pty.Mac
             VSTATUS = 18,
         }
 
-        // int cfsetispeed(struct termios *, speed_t);
-        [DllImport(LibSystem)]
-        internal static extern int cfsetispeed(ref Termios termios, IntPtr speed);
-
-        // int cfsetospeed(struct termios *, speed_t);
-        [DllImport(LibSystem)]
-        internal static extern int cfsetospeed(ref Termios termios, IntPtr speed);
-
-        // pid_t forkpty(int * master, char * aworker, struct termios *, struct winsize *);
-        [DllImport(LibSystem, SetLastError = true)]
-        internal static extern int forkpty(ref int master, StringBuilder? name, ref Termios termp, ref WinSize winsize);
-
-        // pid_t waitpid(pid_t, int *, int)
-        [DllImport(LibSystem, SetLastError = true)]
-        internal static extern int waitpid(int pid, ref int status, int options);
-
-        // int ioctl(int fd, unsigned long request, ...)
-        [DllImport(LibSystem, SetLastError = true)]
-        internal static extern int ioctl(int fd, ulong request, int data);
-
-        [DllImport(LibSystem, SetLastError = true)]
-        internal static extern int ioctl(int fd, ulong request, ref WinSize winSize);
-
-        [DllImport(LibSystem, SetLastError = true)]
-        internal static extern int kill(int pid, int signal);
-
-        internal static void execvpe(string file, string?[] args, IDictionary<string, string> environment)
+        /// <summary>
+        /// Result structure from pty_spawn.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PtySpawnResult
         {
-            if (environment != null)
+            public int MasterFd;
+            public int Pid;
+            public int Error;
+        }
+
+        /// <summary>
+        /// Terminal settings for pty_spawn.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PtyTermios
+        {
+            public uint IFlag;
+            public uint OFlag;
+            public uint CFlag;
+            public uint LFlag;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+            public byte[] CC;
+
+            public uint ISpeed;
+            public uint OSpeed;
+
+            public PtyTermios(
+                TermInputFlag inputFlag,
+                TermOuptutFlag outputFlag,
+                TermConrolFlag controlFlag,
+                TermLocalFlag localFlag,
+                TermSpeed speed,
+                IDictionary<TermSpecialControlCharacter, sbyte> controlCharacters)
             {
-                // Set environment
-                // As this process is going to be replaced by execvp, there is no need in freeing up the allocated memory.
-                IntPtr ppEnv = Marshal.AllocHGlobal((environment.Count + 1) * SizeOfIntPtr);
-                int offset = 0;
-                foreach (var kvp in environment)
+                this.IFlag = (uint)inputFlag;
+                this.OFlag = (uint)outputFlag;
+                this.CFlag = (uint)controlFlag;
+                this.LFlag = (uint)localFlag;
+                this.CC = new byte[32];
+                foreach (var kvp in controlCharacters)
                 {
-                    IntPtr pEnv = Marshal.StringToHGlobalAnsi($"{kvp.Key}={kvp.Value}");
-                    Marshal.WriteIntPtr(ppEnv, offset, pEnv);
-                    offset += SizeOfIntPtr;
+                    this.CC[(int)kvp.Key] = (byte)kvp.Value;
                 }
 
-                Marshal.WriteIntPtr(ppEnv, offset, IntPtr.Zero);
-
-                // _NSGetEnviron() is a pointer to a pointer to an array of pointers to null-terminated strings
-                Marshal.WriteIntPtr(_NSGetEnviron(), ppEnv);
-            }
-
-            if (execvp(file, args) == -1)
-            {
-                Environment.Exit(Marshal.GetLastWin32Error());
-            }
-            else
-            {
-                // Unreachable
-                Environment.Exit(-1);
+                this.ISpeed = (uint)speed;
+                this.OSpeed = (uint)speed;
             }
         }
 
-        // int int execvpe(const char *file, char *const argv[],char *const envp[]);
-        [DllImport(LibSystem, SetLastError = true)]
-        private static extern int execvp(
-            [MarshalAs(UnmanagedType.LPStr)] string file,
-            [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string?[] args);
-
-        // char ***_NSGetEnviron(void);
-        [DllImport(LibSystem)]
-        private static extern IntPtr _NSGetEnviron();
-
+        /// <summary>
+        /// Window size for pty_spawn.
+        /// </summary>
         [StructLayout(LayoutKind.Sequential)]
-        public struct WinSize
+        public struct PtyWinSize
         {
             public ushort Rows;
             public ushort Cols;
             public ushort XPixel;
             public ushort YPixel;
 
-            public WinSize(ushort rows, ushort cols)
+            public PtyWinSize(ushort rows, ushort cols)
             {
                 this.Rows = rows;
                 this.Cols = cols;
@@ -262,45 +248,47 @@ namespace Porta.Pty.Mac
             }
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        public struct Termios
-        {
-            public const int NCCS = 20;
+        /// <summary>
+        /// Spawns a new process with a pseudo-terminal using the native shim.
+        /// This avoids W^X issues by performing fork+exec entirely in native code.
+        /// </summary>
+        [DllImport(LibPortaPty, SetLastError = true)]
+        internal static extern PtySpawnResult pty_spawn(
+            [MarshalAs(UnmanagedType.LPStr)] string file,
+            [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string?[] argv,
+            [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string?[]? envp,
+            [MarshalAs(UnmanagedType.LPStr)] string? workingDir,
+            ref PtyTermios termios,
+            ref PtyWinSize winsize);
 
-            public IntPtr IFlag;
-            public IntPtr OFlag;
-            public IntPtr CFlag;
-            public IntPtr LFlag;
+        /// <summary>
+        /// Resizes the PTY window.
+        /// </summary>
+        [DllImport(LibPortaPty, SetLastError = true)]
+        internal static extern int pty_resize(int masterFd, ushort rows, ushort cols);
 
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = NCCS)]
-            public sbyte[] CC;
-            public IntPtr ISpeed;
-            public IntPtr OSpeed;
+        /// <summary>
+        /// Sends a signal to the child process.
+        /// </summary>
+        [DllImport(LibPortaPty, SetLastError = true)]
+        internal static extern int pty_kill(int pid, int signal);
 
-            public Termios(
-                TermInputFlag inputFlag,
-                TermOuptutFlag outputFlag,
-                TermConrolFlag controlFlag,
-                TermLocalFlag localFlag,
-                TermSpeed speed,
-                IDictionary<TermSpecialControlCharacter, sbyte> controlCharacters)
-            {
-                this.IFlag = (IntPtr)inputFlag;
-                this.OFlag = (IntPtr)outputFlag;
-                this.CFlag = (IntPtr)controlFlag;
-                this.LFlag = (IntPtr)localFlag;
-                this.CC = new sbyte[Termios.NCCS];
-                foreach (var kvp in controlCharacters)
-                {
-                    this.CC[(int)kvp.Key] = kvp.Value;
-                }
+        /// <summary>
+        /// Waits for the child process to exit.
+        /// </summary>
+        [DllImport(LibPortaPty, SetLastError = true)]
+        internal static extern int pty_waitpid(int pid, ref int status, int options);
 
-                this.ISpeed = IntPtr.Zero;
-                this.OSpeed = IntPtr.Zero;
+        /// <summary>
+        /// Closes the PTY master file descriptor.
+        /// </summary>
+        [DllImport(LibPortaPty, SetLastError = true)]
+        internal static extern int pty_close(int masterFd);
 
-                cfsetispeed(ref this, (IntPtr)speed);
-                cfsetospeed(ref this, (IntPtr)speed);
-            }
-        }
+        /// <summary>
+        /// Gets the last error code from the native library.
+        /// </summary>
+        [DllImport(LibPortaPty)]
+        internal static extern int pty_get_errno();
     }
 }

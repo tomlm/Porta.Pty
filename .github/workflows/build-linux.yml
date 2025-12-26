@@ -27,13 +27,28 @@ jobs:
       with:
         dotnet-version: 10.0.x
 
+    - name: Install native build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+
+    - name: Build native PTY shim
+      run: |
+        cd src/Porta.Pty.Native
+        chmod +x build.sh
+        ./build.sh
+
     - name: Restore dependencies
       run: dotnet restore src/Porta.Pty.sln
 
     - name: Build
       run: dotnet build --no-restore src/Porta.Pty.sln --property WarningLevel=0
       
+    - name: Copy native library for tests
+      run: |
+        # Copy to a location the runtime can find for tests
+        cp src/Porta.Pty.Native/output/runtimes/linux-x64/native/libporta_pty.so \
+           src/Porta.Pty.Tests/bin/Debug/net6.0/ || true
+
     - name: Test
       run: dotnet test --no-build --verbosity normal src/Porta.Pty.sln
-      env:
-        DOTNET_EnableWriteXorExecute: 0
