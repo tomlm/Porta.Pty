@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
+﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 namespace Porta.Pty.Unix
@@ -82,7 +82,7 @@ namespace Porta.Pty.Unix
         /// <inheritdoc/>
         public void Kill()
         {
-            if (!this.KillCore(this.controller))
+            if (!this.Kill(this.controller))
             {
                 int errno = Marshal.GetLastWin32Error();
                 // ESRCH means the process doesn't exist (already exited) - that's OK
@@ -96,7 +96,7 @@ namespace Porta.Pty.Unix
         /// <inheritdoc/>
         public void Resize(int cols, int rows)
         {
-            if (!this.ResizeCore(this.controller, cols, rows))
+            if (!this.Resize(this.controller, cols, rows))
             {
                 throw new InvalidOperationException($"Resizing terminal failed with error {Marshal.GetLastWin32Error()}");
             }
@@ -115,14 +115,14 @@ namespace Porta.Pty.Unix
         /// <param name="cols">The number of columns to resize to.</param>
         /// <param name="rows">The number of rows to resize to.</param>
         /// <returns>True if the function suceeded to resize the pty, false otherwise.</returns>
-        protected abstract bool ResizeCore(int controller, int cols, int rows);
+        protected abstract bool Resize(int controller, int cols, int rows);
 
         /// <summary>
         /// Kills the terminal process.
         /// </summary>
         /// <param name="controller">The fd of the pty controller.</param>
         /// <returns>True if the function succeeded in killing the process, false otherwise.</returns>
-        protected abstract bool KillCore(int controller);
+        protected abstract bool Kill(int controller);
 
         /// <summary>
         /// OS-specific implementation of waiting on the given process id.
@@ -149,6 +149,7 @@ namespace Porta.Pty.Unix
 
         private void ChildWatcherThreadProc()
         {
+            Console.WriteLine($"Waiting on {this.pid}");
             const int SignalMask = 127;
             const int ExitCodeMask = 255;
 
@@ -156,6 +157,7 @@ namespace Porta.Pty.Unix
             if (!this.WaitPid(this.pid, ref status))
             {
                 int errno = Marshal.GetLastWin32Error();
+                Console.WriteLine($"Wait failed with {errno}");
                 if (errno == EINTR)
                 {
                     this.ChildWatcherThreadProc();
@@ -173,6 +175,7 @@ namespace Porta.Pty.Unix
                 return;
             }
 
+            Console.WriteLine($"Wait succeeded");
             this.exitSignal = status & SignalMask;
             this.exitCode = this.exitSignal == 0 ? (status >> 8) & ExitCodeMask : 0;
             this.terminalProcessTerminatedEvent.Set();

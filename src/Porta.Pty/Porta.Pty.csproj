@@ -6,9 +6,9 @@
     <LangVersion>8.0</LangVersion>
   </PropertyGroup>
   <PropertyGroup>
-    <Version>1.0.4</Version>
-    <AssemblyVersion>1.0.4.0</AssemblyVersion>
-    <Description>Cross platform (windows/linux/macox) Pty library for communicating with console applications.</Description>
+    <Version>1.0.5</Version>
+    <AssemblyVersion>1.0.5.0</AssemblyVersion>
+    <Description>Cross platform (windows/linux/macos) Pty library for communicating with console applications. Uses native shim for .NET 7+ compatibility (no DOTNET_EnableWriteXorExecute required).</Description>
     <Company>Iciclecreek</Company>
     <Authors>Tom Laird-McConnell</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -32,6 +32,26 @@
     <None Include="../../icon.png" Pack="true" PackagePath="" />
   </ItemGroup>
 
+  <!-- Native runtime libraries for each platform -->
+  <!-- These are built from src/Porta.Pty.Native and placed in the runtimes folder -->
+  <ItemGroup>
+    <None Include="../Porta.Pty.Native/output/runtimes/linux-x64/native/libporta_pty.so" 
+          Pack="true" 
+          PackagePath="runtimes/linux-x64/native/" 
+          Condition="Exists('../Porta.Pty.Native/output/runtimes/linux-x64/native/libporta_pty.so')" />
+    <None Include="../Porta.Pty.Native/output/runtimes/linux-arm64/native/libporta_pty.so" 
+          Pack="true" 
+          PackagePath="runtimes/linux-arm64/native/" 
+          Condition="Exists('../Porta.Pty.Native/output/runtimes/linux-arm64/native/libporta_pty.so')" />
+    <None Include="../Porta.Pty.Native/output/runtimes/osx-x64/native/libporta_pty.dylib" 
+          Pack="true" 
+          PackagePath="runtimes/osx-x64/native/" 
+          Condition="Exists('../Porta.Pty.Native/output/runtimes/osx-x64/native/libporta_pty.dylib')" />
+    <None Include="../Porta.Pty.Native/output/runtimes/osx-arm64/native/libporta_pty.dylib" 
+          Pack="true" 
+          PackagePath="runtimes/osx-arm64/native/" 
+          Condition="Exists('../Porta.Pty.Native/output/runtimes/osx-arm64/native/libporta_pty.dylib')" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Mono.Posix.NETStandard" Version="1.0.0" />

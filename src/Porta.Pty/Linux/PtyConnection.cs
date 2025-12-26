@@ -3,7 +3,6 @@
 
 namespace Porta.Pty.Linux
 {
-    using System.Diagnostics;
     using static Porta.Pty.Linux.NativeMethods;
 
     /// <summary>
@@ -22,22 +21,21 @@ namespace Porta.Pty.Linux
         }
 
         /// <inheritdoc/>
-        protected override bool KillCore(int controller)
+        protected override bool Kill(int controller)
         {
-            return kill(this.Pid, SIGHUP) != -1;
+            return pty_kill(this.Pid, SIGHUP) != -1;
         }
 
         /// <inheritdoc/>
-        protected override bool ResizeCore(int fd, int cols, int rows)
+        protected override bool Resize(int controller, int cols, int rows)
         {
-            var size = new WinSize((ushort)rows, (ushort)cols);
-            return ioctl(fd, TIOCSWINSZ, ref size) != -1;
+            return pty_resize(controller, (ushort)rows, (ushort)cols) != -1;
         }
 
         /// <inheritdoc/>
         protected override bool WaitPid(int pid, ref int status)
         {
-            return waitpid(pid, ref status, 0) != -1;
+            return pty_waitpid(pid, ref status, 0) != -1;
         }
     }
 }
