@@ -19,11 +19,6 @@ namespace Porta.Pty.Mac
         internal const uint TIOCSIG = 0x2000_745F;
         internal const ulong TIOCSWINSZ = 0x8008_7467;
         internal const int SIGHUP = 1;
-        internal const int SIGTERM = 15;
-        internal const int SIGKILL = 9;
-
-        // waitpid options
-        internal const int WNOHANG = 1;
 
         private const string LibSystem = "libSystem.dylib";
 
@@ -208,38 +203,25 @@ namespace Porta.Pty.Mac
         [DllImport(LibSystem, SetLastError = true)]
         internal static extern int kill(int pid, int signal);
 
-        [DllImport(LibSystem, SetLastError = true)]
-        private static extern int setenv(string name, string value, int overwrite);
-
-        [DllImport(LibSystem, SetLastError = true)]
-        private static extern int unsetenv(string name);
-
-        [DllImport(LibSystem, SetLastError = true)]
-        internal static extern int chdir(string path);
-
         internal static void execvpe(string file, string?[] args, IDictionary<string, string> environment)
         {
-            // Set TERM if not already set (important for PTY)
-            if (Environment.GetEnvironmentVariable("TERM") == null)
-            {
-                setenv("TERM", "xterm-256color", 0);
-            }
-
-            // Apply user-specified environment variables (uses setenv which modifies existing environment)
             if (environment != null)
             {
+                // Set environment
+                // As this process is going to be replaced by execvp, there is no need in freeing up the allocated memory.
+                IntPtr ppEnv = Marshal.AllocHGlobal((environment.Count + 1) * SizeOfIntPtr);
+                int offset = 0;
                 foreach (var kvp in environment)
                 {
-                    if (string.IsNullOrEmpty(kvp.Value))
-                    {
-                        // Empty value means remove the variable
-                        unsetenv(kvp.Key);
-                    }
-                    else
-                    {
-                        setenv(kvp.Key, kvp.Value, 1);
-                    }
+                    IntPtr pEnv = Marshal.StringToHGlobalAnsi($"{kvp.Key}={kvp.Value}");
+                    Marshal.WriteIntPtr(ppEnv, offset, pEnv);
+                    offset += SizeOfIntPtr;
                 }
+
+                Marshal.WriteIntPtr(ppEnv, offset, IntPtr.Zero);
+
+                // _NSGetEnviron() is a pointer to a pointer to an array of pointers to null-terminated strings
+                Marshal.WriteIntPtr(_NSGetEnviron(), ppEnv);
             }
 
             if (execvp(file, args) == -1)
