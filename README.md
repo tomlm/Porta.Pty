@@ -5,6 +5,8 @@ A cross-platform pseudoterminal (PTY) library for .NET that enables spawning and
 [![Windows](https://github.com/tomlm/Porta.Pty/actions/workflows/build-windows.yml/badge.svg?branch=main)](https://github.com/tomlm/Porta.Pty/actions/workflows/build-windows.yml)
 [![Linux](https://github.com/tomlm/Porta.Pty/actions/workflows/build-linux.yml/badge.svg?branch=main)](https://github.com/tomlm/Porta.Pty/actions/workflows/build-linux.yml)
 [![macOS](https://github.com/tomlm/Porta.Pty/actions/workflows/build-macos.yml/badge.svg?branch=main)](https://github.com/tomlm/Porta.Pty/actions/workflows/build-macos.yml)
+[![NuGet Version](https://img.shields.io/nuget/v/Porta.Pty.svg)](https://www.nuget.org/packages/Porta.Pty/) 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Features
 
