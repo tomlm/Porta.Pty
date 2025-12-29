@@ -6,8 +6,8 @@
     <LangVersion>8.0</LangVersion>
   </PropertyGroup>
   <PropertyGroup>
-    <Version>1.0.5</Version>
-    <AssemblyVersion>1.0.5.0</AssemblyVersion>
+    <Version>1.0.6</Version>
+    <AssemblyVersion>1.0.6.0</AssemblyVersion>
     <Description>Cross platform (windows/linux/macos) Pty library for communicating with console applications. Uses native shim for .NET 7+ compatibility (no DOTNET_EnableWriteXorExecute required).</Description>
     <Company>Iciclecreek</Company>
     <Authors>Tom Laird-McConnell</Authors>
