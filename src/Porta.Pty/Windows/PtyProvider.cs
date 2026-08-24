@@ -18,6 +18,8 @@ namespace Porta.Pty.Windows
     // `using Windows.Win32` binds relative to it and looks for Porta.Pty.Windows.Windows.Win32.
     using global::Windows.Win32;
     using global::Windows.Win32.Foundation;
+    using global::Windows.Win32.Storage.FileSystem;
+    using global::Windows.Win32.System.Pipes;
     using global::Windows.Win32.System.Threading;
     using static Porta.Pty.Windows.NativeMethods;
 
@@ -224,17 +226,38 @@ namespace Porta.Pty.Windows
             // covered this by accident; PseudoConsole is a plain IDisposable, so the failure path has
             // to say so. Leaking one strands a conhost.exe (or OpenConsole.exe) per failed spawn.
             PseudoConsole? pseudoConsole = null;
+            SafeFileHandle? inPipePseudoConsoleSide = null;
+            SafeFileHandle? inPipeOurSide = null;
+            SafeFileHandle? outPipeOurSide = null;
+            SafeFileHandle? outPipePseudoConsoleSide = null;
+            SafeFileHandle? processHandle = null;
+            SafeFileHandle? mainThreadHandle = null;
 
             try
             {
-                if (!PInvoke.CreatePipe(out var inPipePseudoConsoleSide, out var inPipeOurSide, null, 0))
+                if (options.UseAsyncIo)
                 {
-                    throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    // CreatePipe hands back synchronous, NON-overlapped handles, and FileStream with
+                    // isAsync: true over a non-overlapped handle is invalid -- the very first
+                    // overlapped ReadFile would fail. So the async path builds each pipe by hand:
+                    // CreateNamedPipe with FILE_FLAG_OVERLAPPED for OUR end, CreateFile for the
+                    // ConPTY end. The ConPTY end stays synchronous on purpose; conhost services it
+                    // with its own machinery and never sees our overlapped flag. This is the same
+                    // construction System.Diagnostics.Process uses for async redirected stdio.
+                    (inPipeOurSide, inPipePseudoConsoleSide) = CreateOverlappedPipe(ourSideReads: false);
+                    (outPipeOurSide, outPipePseudoConsoleSide) = CreateOverlappedPipe(ourSideReads: true);
                 }
-
-                if (!PInvoke.CreatePipe(out var outPipeOurSide, out var outPipePseudoConsoleSide, null, 0))
+                else
                 {
-                    throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    if (!PInvoke.CreatePipe(out inPipePseudoConsoleSide, out inPipeOurSide, null, 0))
+                    {
+                        throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    }
+
+                    if (!PInvoke.CreatePipe(out outPipeOurSide, out outPipePseudoConsoleSide, null, 0))
+                    {
+                        throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    }
                 }
 
                 // Either ConPTY implementation, chosen at runtime by PORTAPTY_CONPTY. See PseudoConsole.
@@ -282,8 +305,6 @@ namespace Porta.Pty.Windows
                         $"Starting terminal process '{app}' with command line {commandLine} "
                         + $"via {pseudoConsole.Implementation}");
 
-                    SafeFileHandle? processHandle = null;
-                    SafeFileHandle? mainThreadHandle = null;
                     int pid = 0;
                     bool success = false;
                     
@@ -388,7 +409,8 @@ namespace Porta.Pty.Windows
                         processHandle!,
                         pid,
                         mainThreadHandle!,
-                        jobObjectHandle);
+                        jobObjectHandle,
+                        options.UseAsyncIo);
 
                     var result = new PseudoConsoleConnection(connectionOptions);
                     AnswerDeviceAttributes(result, pseudoConsole);
@@ -403,7 +425,93 @@ namespace Porta.Pty.Windows
             {
                 // If anything fails, make sure to dispose the pseudoconsole and the job object
                 pseudoConsole?.Dispose();
+                inPipePseudoConsoleSide?.Dispose();
+                inPipeOurSide?.Dispose();
+                outPipeOurSide?.Dispose();
+                outPipePseudoConsoleSide?.Dispose();
+                mainThreadHandle?.Dispose();
+                processHandle?.Dispose();
                 jobObjectHandle?.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Creates a pipe whose LOCAL end is opened overlapped, so a FileStream over it can be
+        /// isAsync: true and reads are serviced by the I/O completion port with no thread pending.
+        /// </summary>
+        /// <param name="ourSideReads">True for the child's stdout pipe (we hold the read end);
+        /// false for the child's stdin pipe (we hold the write end).</param>
+        /// <returns>Our overlapped end, and the synchronous end to hand to CreatePseudoConsole.</returns>
+        /// <remarks>
+        /// A named pipe with a unique GUID name, because anonymous pipes cannot be overlapped --
+        /// CreatePipe has no flags parameter at all. The client connect needs no ConnectNamedPipe
+        /// first; a CreateFile against a listening instance succeeds immediately, which is the same
+        /// behaviour System.Diagnostics.Process relies on for async redirected stdio.
+        /// </remarks>
+        private static (SafeFileHandle OurSide, SafeFileHandle PseudoConsoleSide) CreateOverlappedPipe(bool ourSideReads)
+        {
+            string pipeName = $@"\\.\pipe\porta-pty-{Guid.NewGuid():N}";
+            FILE_FLAGS_AND_ATTRIBUTES access = ourSideReads
+                ? FILE_FLAGS_AND_ATTRIBUTES.PIPE_ACCESS_INBOUND
+                : FILE_FLAGS_AND_ATTRIBUTES.PIPE_ACCESS_OUTBOUND;
+
+            SafeFileHandle ourSide = PInvoke.CreateNamedPipe(
+                pipeName,
+                access
+                    | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OVERLAPPED
+                    // The GUID makes a collision negligible; this flag is what makes a SQUATTER
+                    // loud. If anything already owns the name, creation fails here rather than
+                    // quietly sharing a pipe with a stranger.
+                    | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_FIRST_PIPE_INSTANCE,
+                NAMED_PIPE_MODE.PIPE_TYPE_BYTE
+                    | NAMED_PIPE_MODE.PIPE_READMODE_BYTE
+                    | NAMED_PIPE_MODE.PIPE_WAIT
+                    | NAMED_PIPE_MODE.PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                // Unlike CreatePipe, zero here gives an overlapped writer no quota and its first
+                // write waits for a reader. This is the standard CreatePipeEx default.
+                4096,
+                4096,
+                0,
+                null);
+
+            if (ourSide.IsInvalid)
+            {
+                int errorCode = Marshal.GetLastWin32Error();
+                ourSide.Dispose();
+                throw new InvalidOperationException(
+                    "Could not create an overlapped named pipe",
+                    new Win32Exception(errorCode));
+            }
+
+            try
+            {
+                SafeFileHandle pseudoConsoleSide = PInvoke.CreateFile(
+                    pipeName,
+                    (uint)(ourSideReads
+                        ? GENERIC_ACCESS_RIGHTS.GENERIC_WRITE
+                        : GENERIC_ACCESS_RIGHTS.GENERIC_READ),
+                    FILE_SHARE_MODE.FILE_SHARE_NONE,
+                    null,
+                    FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_NORMAL,
+                    null!);
+
+                if (pseudoConsoleSide.IsInvalid)
+                {
+                    int errorCode = Marshal.GetLastWin32Error();
+                    pseudoConsoleSide.Dispose();
+                    throw new InvalidOperationException(
+                        "Could not open the ConPTY side of an overlapped named pipe",
+                        new Win32Exception(errorCode));
+                }
+
+                return (ourSide, pseudoConsoleSide);
+            }
+            catch
+            {
+                ourSide.Dispose();
                 throw;
             }
         }

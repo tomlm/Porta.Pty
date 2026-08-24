@@ -21,6 +21,17 @@ namespace Porta.Pty.Mac
         {
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="PtyConnection"/> class.
+        /// </summary>
+        /// <param name="controller">The fd of the pty controller.</param>
+        /// <param name="pid">The id of the spawned process.</param>
+        /// <param name="useAsyncIo">Whether async reads and writes should avoid holding a thread.</param>
+        public PtyConnection(int controller, int pid, bool useAsyncIo)
+            : base(controller, pid, useAsyncIo)
+        {
+        }
+
         /// <inheritdoc/>
         protected override bool Kill(int controller)
         {
@@ -47,6 +58,12 @@ namespace Porta.Pty.Mac
         protected override bool Close(int controller)
         {
             return pty_close(controller) != -1;
+        }
+
+        /// <inheritdoc/>
+        protected override int WaitPidNoHang(int pid, ref int status)
+        {
+            return pty_waitpid(pid, ref status, WNOHANG);
         }
 
         /// <inheritdoc/>

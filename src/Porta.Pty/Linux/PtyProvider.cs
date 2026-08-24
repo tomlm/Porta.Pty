@@ -79,7 +79,20 @@ namespace Porta.Pty.Linux
                     + $"({GetErrorMessage(result.Error)}), masterFd={result.MasterFd}, pid={result.Pid}");
             }
             
-            return Task.FromResult<IPtyConnection>(new PtyConnection(result.MasterFd, result.Pid));
+            int discardedStatus = 0;
+            try
+            {
+                return Task.FromResult<IPtyConnection>(new PtyConnection(result.MasterFd, result.Pid, options.UseAsyncIo));
+            }
+            catch
+            {
+                // The child is already running and the controller already open, so a constructor
+                // that refuses the connection would otherwise strand both.
+                pty_kill(result.Pid, SIGKILL);
+                pty_waitpid(result.Pid, ref discardedStatus, 0);
+                pty_close(result.MasterFd);
+                throw;
+            }
         }
 
         /// <remarks>

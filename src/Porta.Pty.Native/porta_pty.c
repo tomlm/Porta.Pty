@@ -14,14 +14,20 @@
 #if defined(__APPLE__)
     #include <util.h>
     #include <sys/ioctl.h>
+    #include <sys/event.h>
+    #include <sys/time.h>
 #else
     #include <pty.h>
+    #include <sys/epoll.h>
+    #include <sys/syscall.h>
 #endif
 
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <termios.h>
 #include <sys/wait.h>
@@ -302,6 +308,154 @@ PTY_EXPORT int pty_close(int master_fd)
  * Returns:
  *   The current errno value
  */
+/*
+ * Puts the pty controller into non-blocking mode.
+ *
+ * This exists in the shim rather than as a libc P/Invoke because fcntl is VARIADIC --
+ * int fcntl(int, int, ...) -- and on Apple ARM64 variadic arguments are passed on the stack
+ * while fixed arguments are passed in registers. A P/Invoke declaring three fixed ints puts
+ * the third in a register, the callee reads the stack, and F_SETFL applies whatever junk was
+ * there. It then returns 0, so the caller is told the descriptor is non-blocking when it is
+ * not. Observed on macOS: asking for O_RDWR|O_NONBLOCK (0x6) produced flags of 0x400042.
+ *
+ * It happens to work on Linux, where both calling conventions pass integers in registers, so
+ * the failure is macOS-only and silent -- which is worse than a failure that is neither.
+ */
+PTY_EXPORT int pty_set_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1)
+    {
+        return -1;
+    }
+
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+/*
+ * Exit notification without polling.
+ *
+ * The reaper polls waitpid(WNOHANG) every 100ms, which costs latency on WaitForExit and
+ * ProcessExited and a thread to do it on. Both kernels can tell us instead, and both can do it
+ * through a single POLLABLE descriptor -- which means the existing pty poll(2) loop can carry it and
+ * the reaper thread stops existing.
+ *
+ * The two mechanisms are shaped differently and are wrapped into one here:
+ *   macOS  one kqueue holds an EVFILT_PROC/NOTE_EXIT registration per pid.
+ *   Linux  one epoll holds a pidfd per pid. pidfd_open needs Linux 5.3, and had no glibc wrapper
+ *          before 2.36, so it goes through syscall() -- which is variadic, and therefore exactly
+ *          the thing that must not be called from a P/Invoke. See pty_set_nonblocking.
+ *
+ * pty_exit_queue returns -1 when this kernel cannot do it, which the caller reports as an
+ * unsupported platform rather than silently doing something slower.
+ */
+PTY_EXPORT int pty_exit_queue(void)
+{
+#if defined(__APPLE__)
+    return kqueue();
+#elif defined(SYS_pidfd_open)
+    /*
+     * PROBE pidfd_open, do not merely compile against it. SYS_pidfd_open is a property of the
+     * build machine's headers, and epoll_create1 succeeds on every kernel -- so testing either one
+     * says nothing about whether the kernel running this binary can do the thing. Built on a
+     * modern CI image and run on a 4.18 kernel, both tests pass and every syscall that matters
+     * then fails at the point of use.
+     *
+     * Opening a descriptor to ourselves answers the question directly and costs one syscall, once.
+     */
+    int probe = (int)syscall(SYS_pidfd_open, getpid(), 0);
+    if (probe == -1)
+    {
+        return -1;
+    }
+    close(probe);
+
+    return epoll_create1(EPOLL_CLOEXEC);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+/*
+ * Starts watching one pid. Returns 0 on success and -1 otherwise -- including when the child has
+ * ALREADY exited, which both kernels report as ESRCH. That case is not a failure either; the caller
+ * reaps it directly. Losing that distinction would lose the exit.
+ */
+PTY_EXPORT int pty_exit_watch(int queue, int pid)
+{
+#if defined(__APPLE__)
+    struct kevent kev;
+    EV_SET(&kev, (uintptr_t)pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    return kevent(queue, &kev, 1, NULL, 0, NULL);
+#elif defined(SYS_pidfd_open)
+    int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pidfd == -1)
+    {
+        return -1;
+    }
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    /* Both halves are needed on the way out: the pid to reap, the descriptor to close. */
+    ev.data.u64 = ((uint64_t)(uint32_t)pidfd << 32) | (uint32_t)pid;
+    if (epoll_ctl(queue, EPOLL_CTL_ADD, pidfd, &ev) == -1)
+    {
+        int saved = errno;
+        close(pidfd);
+        errno = saved;
+        return -1;
+    }
+
+    return 0;
+#else
+    (void)queue; (void)pid;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+/*
+ * Collects the pids that have exited, without blocking. Returns how many were written, or -1.
+ * The caller still has to waitpid() each one: these kernels report the exit, not the status.
+ */
+PTY_EXPORT int pty_exit_drain(int queue, int *pids, int max)
+{
+    if (max <= 0)
+    {
+        return 0;
+    }
+
+#if defined(__APPLE__)
+    struct kevent events[64];
+    int want = max < 64 ? max : 64;
+    struct timespec zero = {0, 0};
+    int n = kevent(queue, NULL, 0, events, want, &zero);
+    for (int i = 0; i < n; i++)
+    {
+        pids[i] = (int)events[i].ident;
+    }
+    return n;
+#elif defined(SYS_pidfd_open)
+    struct epoll_event events[64];
+    int want = max < 64 ? max : 64;
+    int n = epoll_wait(queue, events, want, 0);
+    for (int i = 0; i < n; i++)
+    {
+        int pidfd = (int)(events[i].data.u64 >> 32);
+        pids[i] = (int)(uint32_t)events[i].data.u64;
+        /* One shot, to match the macOS registration: drop it and close the descriptor. */
+        epoll_ctl(queue, EPOLL_CTL_DEL, pidfd, NULL);
+        close(pidfd);
+    }
+    return n;
+#else
+    (void)queue; (void)pids;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
 PTY_EXPORT int pty_get_errno(void)
 {
     return errno;
