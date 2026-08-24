@@ -175,21 +175,40 @@ namespace Porta.Pty.Unix
 
             int status = 0;
             int result;
-            int error = 0;
-            try
+
+            // RETRIES on EINTR rather than returning. The earlier version deferred, which was right
+            // when a polling loop would come back in 100ms and wrong now: the notification is
+            // one-shot -- kqueue registers EV_ONESHOT, and the epoll path removes and closes the
+            // pidfd as it drains -- so there is no second telling. A signal landing on this one
+            // waitpid would have lost the exit permanently, leaving the child unreaped and
+            // WaitForExit and ProcessExited never completing.
+            while (true)
             {
-                result = entry!.Attempt(pid, ref status);
-                error = result < 0 ? Marshal.GetLastPInvokeError() : 0;
-            }
-            catch
-            {
-                result = -1;
-                error = 0;
+                try
+                {
+                    result = entry!.Attempt(pid, ref status);
+                    if (result >= 0 || Marshal.GetLastPInvokeError() != EINTR)
+                    {
+                        break;
+                    }
+                }
+                catch
+                {
+                    result = -1;
+                    break;
+                }
             }
 
-            if (result == 0 || (result < 0 && error == EINTR))
+            if (result == 0)
             {
-                // Not collectable yet, or interrupted. Either way it stays registered.
+                // Reported as exited but not collectable, which should not happen: both mechanisms
+                // fire only once the process is gone. Re-arm rather than assume, since the one-shot
+                // notification has already been spent and dropping it here loses the child.
+                if (this.queue >= 0 && pty_exit_watch(this.queue, pid) != 0)
+                {
+                    this.CollectIfExited(pid);
+                }
+
                 return;
             }
 

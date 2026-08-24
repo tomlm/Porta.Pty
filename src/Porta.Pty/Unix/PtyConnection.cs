@@ -24,7 +24,6 @@ namespace Porta.Pty.Unix
         private int exitCode;
         private int exitSignal;
         private bool isDisposed;
-        private readonly bool usesSharedReaper;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="PtyConnection"/> class.
@@ -86,8 +85,6 @@ namespace Porta.Pty.Unix
 
             this.controller = controller;
             this.pid = pid;
-            this.usesSharedReaper = useAsyncIo;
-
             if (useAsyncIo)
             {
                 // One reaper for the whole process instead of a thread apiece. This is the half that
