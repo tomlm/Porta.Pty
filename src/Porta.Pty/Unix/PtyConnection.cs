@@ -19,6 +19,7 @@ namespace Porta.Pty.Unix
         private const int ESRCH = 3;
 
         private readonly int controller;
+        private readonly PtyDescriptor descriptor;
         private readonly int pid;
         private readonly ManualResetEvent terminalProcessTerminatedEvent = new ManualResetEvent(false);
         private int exitCode;
@@ -31,20 +32,80 @@ namespace Porta.Pty.Unix
         /// <param name="controller">The fd of the pty controller.</param>
         /// <param name="pid">The id of the spawned process.</param>
         public PtyConnection(int controller, int pid)
+            : this(controller, pid, useAsyncIo: false)
         {
-            this.ReaderStream = new PtyStream(controller, FileAccess.Read);
-            this.WriterStream = new PtyStream(controller, FileAccess.Write);
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="PtyConnection"/> class.
+        /// </summary>
+        /// <param name="controller">The fd of the pty controller.</param>
+        /// <param name="pid">The id of the spawned process.</param>
+        /// <param name="useAsyncIo">Whether async reads and writes should avoid holding a thread.</param>
+        public PtyConnection(int controller, int pid, bool useAsyncIo)
+        {
+            if (useAsyncIo)
+            {
+                if (!NativeIo.SetNonBlocking(controller))
+                {
+                    // Throws rather than falling back to the blocking pair. The fallback looked like
+                    // the careful choice and was the opposite: UseAsyncIo publicly guarantees that a
+                    // pending read holds no thread, the shared reaper still made the option appear
+                    // enabled, and a caller holding hundreds of sessions had no way to discover it
+                    // had silently gone back to a thread apiece. A spawn that cannot honour what was
+                    // asked for should say so.
+                    throw new InvalidOperationException(
+                        "Could not put the pty controller into non-blocking mode, which "
+                        + $"{nameof(PtyOptions.UseAsyncIo)} requires (errno "
+                        + $"{Marshal.GetLastPInvokeError()}).");
+                }
+
+                if (!PtyReaper.Instance.IsSupported)
+                {
+                    // Refused rather than quietly polling instead. The exit notification this option
+                    // depends on needs Linux 5.3 for pidfd_open; of the distributions .NET 10
+                    // supports, only RHEL 8 is older. Carrying a polling fallback for that would mean
+                    // shipping a second implementation that CI can never exercise, so the option
+                    // says no and the default blocking path -- unchanged, and working everywhere --
+                    // remains available.
+                    throw new PlatformNotSupportedException(
+                        $"{nameof(PtyOptions.UseAsyncIo)} needs kernel support for watching a child "
+                        + "process exit, which on Linux means pidfd_open and so kernel 5.3 or newer.");
+                }
+
+                // Both streams share the one descriptor, so the mode is a property of the connection
+                // rather than of either stream.
+                this.descriptor = new PtyDescriptor(controller);
+                this.ReaderStream = new NonBlockingPtyStream(this.descriptor, FileAccess.Read);
+                this.WriterStream = new NonBlockingPtyStream(this.descriptor, FileAccess.Write);
+            }
+            else
+            {
+                this.descriptor = new PtyDescriptor(controller);
+                this.ReaderStream = new PtyStream(controller, FileAccess.Read);
+                this.WriterStream = new PtyStream(controller, FileAccess.Write);
+            }
 
             this.controller = controller;
             this.pid = pid;
-            var childWatcherThread = new Thread(this.ChildWatcherThreadProc)
+            if (useAsyncIo)
             {
-                IsBackground = true,
-                Priority = ThreadPriority.Lowest,
-                Name = $"Watcher thread for child process {pid}",
-            };
+                // One reaper for the whole process instead of a thread apiece. This is the half that
+                // actually moves the number: making reads threadless still left a watcher per
+                // connection blocked in waitpid.
+                PtyReaper.Instance.Register(pid, this.WaitPidNoHang, this.OnChildExited);
+            }
+            else
+            {
+                var childWatcherThread = new Thread(this.ChildWatcherThreadProc)
+                {
+                    IsBackground = true,
+                    Priority = ThreadPriority.Lowest,
+                    Name = $"Watcher thread for child process {pid}",
+                };
 
-            childWatcherThread.Start();
+                childWatcherThread.Start();
+            }
         }
 
         /// <inheritdoc/>
@@ -93,6 +154,19 @@ namespace Porta.Pty.Unix
             // Found because moving this suite into a single MTP process ran four 24-spawn tests
             // back to back and the third started failing; each test alone had always been fine.
             this.TryClose();
+
+            // Deliberately NOT unregistering from the reaper. TryKill above sends SIGHUP and then
+            // SIGKILL, but a signalled child is not a collected one -- it stays a zombie until
+            // somebody waits on it. Dropping the registration here meant nothing ever did, so a
+            // disposed connection leaked a process table entry for the life of the host.
+            //
+            // The blocking path does not have that problem because its watcher thread stays in
+            // waitpid until the child is collected, and keeps doing so after Dispose. Leaving the
+            // registration in place is what matches it: the reaper collects the status on its next
+            // pass and drops the entry itself.
+            //
+            // The churn test hid this, because it calls Kill and WaitForExit before Dispose, which
+            // gives the reaper time to collect first.
         }
 
         /// <inheritdoc/>
@@ -148,6 +222,14 @@ namespace Porta.Pty.Unix
         protected abstract bool Close(int controller);
 
         /// <summary>
+        /// OS-specific waitpid that does not block, for the shared reaper.
+        /// </summary>
+        /// <param name="pid">The process id to check.</param>
+        /// <param name="status">The status of the process, when it has one.</param>
+        /// <returns>The pid once it has exited, 0 while it is still running, -1 on failure.</returns>
+        protected abstract int WaitPidNoHang(int pid, ref int status);
+
+        /// <summary>
         /// OS-specific implementation of waiting on the given process id.
         /// </summary>
         /// <param name="pid">The process id to wait on.</param>
@@ -175,7 +257,10 @@ namespace Porta.Pty.Unix
         {
             try
             {
-                this.Close(this.controller);
+                // Through the descriptor, so the close waits for any transfer already inside a
+                // read(2) or write(2) to finish. Closing underneath one would let the number be
+                // reissued while a syscall is still using it.
+                this.descriptor.Close(this.Close);
             }
             catch
             {
@@ -186,8 +271,6 @@ namespace Porta.Pty.Unix
         private void ChildWatcherThreadProc()
         {
             Debug.WriteLine($"Waiting on {this.pid}");
-            const int SignalMask = 127;
-            const int ExitCodeMask = 255;
 
             int status = 0;
             if (!this.WaitPid(this.pid, ref status))
@@ -212,6 +295,18 @@ namespace Porta.Pty.Unix
             }
 
             Debug.WriteLine($"Wait succeeded");
+            this.OnChildExited(status);
+        }
+
+        /// <summary>
+        /// Records an exit status and tells anyone waiting. Shared by the per-connection watcher and
+        /// the process-wide reaper, so the two paths cannot drift.
+        /// </summary>
+        private void OnChildExited(int status)
+        {
+            const int SignalMask = 127;
+            const int ExitCodeMask = 255;
+
             this.exitSignal = status & SignalMask;
             this.exitCode = this.exitSignal == 0 ? (status >> 8) & ExitCodeMask : 0;
             this.terminalProcessTerminatedEvent.Set();

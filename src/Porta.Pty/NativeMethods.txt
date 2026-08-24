@@ -5,6 +5,9 @@ InitializeProcThreadAttributeList
 UpdateProcThreadAttribute
 DeleteProcThreadAttributeList
 CreatePipe
+CreateNamedPipe
+CreateFile
+GENERIC_ACCESS_RIGHTS
 CreateProcess
 CreatePseudoConsole
 ResizePseudoConsole

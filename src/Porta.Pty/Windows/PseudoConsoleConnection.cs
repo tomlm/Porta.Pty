@@ -45,7 +45,7 @@ namespace Porta.Pty.Windows
                 new SafeFileHandle(handles.OutPipeOurSide.DangerousGetHandle(), ownsHandle: false),
                 System.IO.FileAccess.Read,
                 bufferSize: 0,  // No buffering
-                isAsync: false);
+                isAsync: handles.UseAsyncIo);
 
             // Paired with PtyProvider.AnswerDeviceAttributes, and gated on the same condition it is:
             // out-of-band ConPTY is the only one that asks, we answer for the consumer, and so the
@@ -61,7 +61,7 @@ namespace Porta.Pty.Windows
                 new SafeFileHandle(handles.InPipeOurSide.DangerousGetHandle(), ownsHandle: false),
                 System.IO.FileAccess.Write,
                 bufferSize: 0,  // No buffering - writes go directly to pipe
-                isAsync: false);
+                isAsync: handles.UseAsyncIo);
 
             this.handles = handles;
             this.Pid = handles.Pid;
@@ -169,6 +169,26 @@ namespace Porta.Pty.Windows
                 return;
             }
 
+            lock (this.disposeLock)
+            {
+                if (!this.isDisposed && this.handles?.UseAsyncIo == true)
+                {
+                    // Close the pseudoconsole as soon as the child is gone, so a pending overlapped
+                    // read completes instead of pending forever. Conhost holds the pipe ends OPEN
+                    // after the child exits, until ClosePseudoConsole -- measured directly: child
+                    // exit reported, read still pending 30 seconds later. Data conhost already wrote
+                    // is not lost; a pipe whose writer has gone drains what is buffered and THEN
+                    // reports broken, which FileStream surfaces as the 0-byte read the contract
+                    // requires. Closed BEFORE raising the event so a handler can drain through EOF.
+                    //
+                    // Async path only. The blocking path has always behaved this way and stays
+                    // untouched. Under the same lock Dispose uses for its flag, so the two callers
+                    // of PseudoConsole.Dispose cannot interleave: its idempotence guard is a plain
+                    // bool, safe only when calls are serialized.
+                    this.handles.PseudoConsoleHandle.Dispose();
+                }
+            }
+
             this.ProcessExited?.Invoke(this, new PtyExitedEventArgs(this.process.ExitCode));
         }
 
@@ -187,6 +207,7 @@ namespace Porta.Pty.Windows
             /// <param name="pid">the process ID.</param>
             /// <param name="mainThreadHandle">the handle to the main thread.</param>
             /// <param name="jobObjectHandle">the handle to the job object that manages process lifetime.</param>
+            /// <param name="useAsyncIo">whether the local pipe handles support overlapped I/O.</param>
             public PseudoConsoleConnectionHandles(
                 SafeFileHandle inPipeOurSide,
                 SafeFileHandle outPipeOurSide,
@@ -194,7 +215,8 @@ namespace Porta.Pty.Windows
                 SafeFileHandle processHandle,
                 int pid,
                 SafeFileHandle mainThreadHandle,
-                SafeFileHandle jobObjectHandle)
+                SafeFileHandle jobObjectHandle,
+                bool useAsyncIo)
             {
                 this.InPipeOurSide = inPipeOurSide;
                 this.OutPipeOurSide = outPipeOurSide;
@@ -203,6 +225,7 @@ namespace Porta.Pty.Windows
                 this.Pid = pid;
                 this.MainThreadHandle = mainThreadHandle;
                 this.JobObjectHandle = jobObjectHandle;
+                this.UseAsyncIo = useAsyncIo;
             }
 
             /// <summary>
@@ -240,6 +263,11 @@ namespace Porta.Pty.Windows
             /// When this handle is closed, all processes assigned to the job are terminated.
             /// </summary>
             internal SafeFileHandle JobObjectHandle { get; }
+
+            /// <summary>
+            /// Gets a value indicating whether the local pipe handles support overlapped I/O.
+            /// </summary>
+            internal bool UseAsyncIo { get; }
         }
     }
 }
