@@ -17,8 +17,8 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <RepositoryUrl>https://github.com/tomlm/Porta.Pty</RepositoryUrl>
     <Copyright>Tom Laird-McConnell All Rights Reserved</Copyright>
-    <Version>2.0.2</Version>
-    <AssemblyVersion>2.0.2.0</AssemblyVersion>
+    <Version>2.1.0</Version>
+    <AssemblyVersion>2.1.0.0</AssemblyVersion>
     <RootNamespace>Porta.Pty</RootNamespace>
     <PackageTags>pty;conpty;ptty</PackageTags>
     <ContentTargetFolders>content</ContentTargetFolders>
