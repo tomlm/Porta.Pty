@@ -431,6 +431,15 @@ PTY_EXPORT int pty_exit_drain(int queue, int *pids, int max)
     int want = max < 64 ? max : 64;
     struct timespec zero = {0, 0};
     int n = kevent(queue, NULL, 0, events, want, &zero);
+    if (n == -1)
+    {
+        /* Reported as a failure, not as "nothing exited". Falling through returned 0, which the
+         * caller cannot tell from an empty drain -- and the Linux branch below returns -1 for the
+         * same condition, so the two platforms disagreed with each other and with this function's
+         * own contract. */
+        return -1;
+    }
+
     int out = 0;
     for (int i = 0; i < n; i++)
     {

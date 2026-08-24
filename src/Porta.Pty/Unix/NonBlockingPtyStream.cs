@@ -68,7 +68,7 @@ namespace Porta.Pty.Unix
 
                 if (error == EAgain)
                 {
-                    await PtyPoller.Instance.WaitReadableAsync(this.descriptor.Raw, cancellationToken).ConfigureAwait(false);
+                    await this.WaitReadableAsync(cancellationToken).ConfigureAwait(false);
 
                     // Re-checked after the wait, not only before it. Dispose completes pending
                     // waiters through Unregister, so without this the loop woke, saw EAGAIN again,
@@ -119,7 +119,7 @@ namespace Porta.Pty.Unix
 
                 if (error == EAgain)
                 {
-                    await PtyPoller.Instance.WaitWritableAsync(this.descriptor.Raw, cancellationToken).ConfigureAwait(false);
+                    await this.WaitWritableAsync(cancellationToken).ConfigureAwait(false);
                     this.ThrowIfDisposed();
                     continue;
                 }
@@ -157,6 +157,46 @@ namespace Porta.Pty.Unix
             }
 
             base.Dispose(disposing);
+        }
+
+        /// <summary>
+        /// Registers interest in this descriptor becoming readable, under the reference count.
+        /// </summary>
+        /// <remarks>
+        /// The REGISTRATION is what needs the reference, not the await. Reading the raw descriptor
+        /// and registering it outside the count meant a wait could be armed after Close had already
+        /// returned -- and since the stream's own Unregister had run by then, a reused descriptor
+        /// number that never becomes readable left the read pending forever, completing neither
+        /// with data nor with ObjectDisposedException. That is precisely the invariant
+        /// PtyDescriptor exists to provide, so registering outside it undid the point.
+        ///
+        /// The reference is released before awaiting, because holding it across the wait would
+        /// block Close for as long as the session is idle -- which is most of its life.
+        /// </remarks>
+        private Task WaitReadableAsync(CancellationToken cancellationToken)
+            => this.Register(PtyPoller.Instance.WaitReadableAsync, cancellationToken);
+
+        /// <summary>
+        /// Registers interest in this descriptor accepting a write, under the reference count.
+        /// </summary>
+        private Task WaitWritableAsync(CancellationToken cancellationToken)
+            => this.Register(PtyPoller.Instance.WaitWritableAsync, cancellationToken);
+
+        private Task Register(Func<int, CancellationToken, Task> wait, CancellationToken cancellationToken)
+        {
+            if (!this.descriptor.TryAcquire())
+            {
+                throw new ObjectDisposedException(nameof(NonBlockingPtyStream));
+            }
+
+            try
+            {
+                return wait(this.descriptor.Raw, cancellationToken);
+            }
+            finally
+            {
+                this.descriptor.Release();
+            }
         }
 
         private const int EIoError = 5;
