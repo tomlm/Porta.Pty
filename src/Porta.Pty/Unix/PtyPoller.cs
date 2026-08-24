@@ -5,6 +5,7 @@ namespace Porta.Pty.Unix
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
@@ -37,6 +38,10 @@ namespace Porta.Pty.Unix
         private readonly object gate = new();
         private readonly Dictionary<int, Registration> registrations = new();
         private readonly List<int> stale = new();
+        private PollFd[]? cachedSet;
+        private int[]? cachedOrder;
+        private int version;
+        private int cachedVersion = -1;
         private readonly int wakeupReadFd;
         private readonly int wakeupWriteFd;
 
@@ -108,6 +113,8 @@ namespace Porta.Pty.Unix
                 {
                     return;
                 }
+
+                this.version++;
             }
 
             registration!.CompleteAll();
@@ -130,6 +137,7 @@ namespace Porta.Pty.Unix
                 {
                     registration = new Registration();
                     this.registrations[fd] = registration;
+                    this.version++;
                 }
 
                 waiter = registration.Add(events, completion);
@@ -175,6 +183,7 @@ namespace Porta.Pty.Unix
                 if (this.registrations.TryGetValue(fd, out var registration) && registration.Remove(waiter) == 0)
                 {
                     this.registrations.Remove(fd);
+                    this.version++;
                 }
             }
 
@@ -208,11 +217,8 @@ namespace Porta.Pty.Unix
                     // were asked for, so a descriptor whose child has exited returns from every
                     // poll immediately, and a set full of those is a spin at full CPU rather than a
                     // thread parked in the kernel. A registration now lives exactly as long as a
-                    // waiter does.
-                    if (this.stale.Count > 0)
-                    {
-                        this.stale.Clear();
-                    }
+                    // waiter.
+                    this.stale.Clear();
 
                     foreach (var pair in this.registrations)
                     {
@@ -225,17 +231,38 @@ namespace Porta.Pty.Unix
                     foreach (var fd in this.stale)
                     {
                         this.registrations.Remove(fd);
+                        this.version++;
                     }
 
-                    set = new PollFd[this.registrations.Count + 1];
-                    fdOrder = new int[this.registrations.Count];
-                    set[0] = new PollFd { Fd = this.wakeupReadFd, Events = POLLIN };
-
-                    var i = 1;
-                    foreach (var pair in this.registrations)
+                    // Rebuilt only when the registration set actually changed. Wake() runs once per
+                    // WaitAsync -- so once per read, per session -- and reallocating both arrays on
+                    // every one of those was steady churn on the single shared thread, under
+                    // precisely the many-session workload this exists to serve.
+                    if (this.cachedSet is null || this.cachedVersion != this.version)
                     {
-                        fdOrder[i - 1] = pair.Key;
-                        set[i++] = new PollFd { Fd = pair.Key, Events = pair.Value.InterestedEvents };
+                        this.cachedSet = new PollFd[this.registrations.Count + 1];
+                        this.cachedOrder = new int[this.registrations.Count];
+
+                        var i = 1;
+                        foreach (var pair in this.registrations)
+                        {
+                            this.cachedOrder[i - 1] = pair.Key;
+                            this.cachedSet[i++] = new PollFd { Fd = pair.Key };
+                        }
+
+                        this.cachedVersion = this.version;
+                    }
+
+                    set = this.cachedSet;
+                    fdOrder = this.cachedOrder!;
+
+                    // Events and revents still refresh every pass: interest changes without the
+                    // registration set changing, and revents is where the kernel writes its answer.
+                    set[0] = new PollFd { Fd = this.wakeupReadFd, Events = POLLIN };
+                    for (var i = 0; i < fdOrder.Length; i++)
+                    {
+                        set[i + 1].Events = this.registrations[fdOrder[i]].InterestedEvents;
+                        set[i + 1].Revents = 0;
                     }
                 }
 
@@ -247,9 +274,15 @@ namespace Porta.Pty.Unix
                         continue;
                     }
 
-                    // Nothing useful to do with any other failure, and throwing on a background
-                    // thread would take the process down. Back off so a persistent failure is a
-                    // slow loop rather than a spin.
+                    // Not throwing is right -- this is a background thread and letting it escape
+                    // takes the process down -- but not throwing and not TELLING anyone are
+                    // separable, and only the first was intended. A persistent failure here leaves
+                    // every async pty read quantised to this backoff forever with nothing to say
+                    // why, and since synchronous Read and Write route through this loop too, a
+                    // wedged loop hangs those callers as well.
+                    Debug.WriteLine(
+                        $"Porta.Pty poller: poll(2) failed with errno {Marshal.GetLastPInvokeError()}; retrying.");
+
                     Thread.Sleep(50);
                     continue;
                 }
@@ -311,23 +344,18 @@ namespace Porta.Pty.Unix
         private sealed class Registration
         {
             private readonly List<Waiter> waiters = new();
+            private short interestedEvents;
 
-            internal short InterestedEvents
-            {
-                get
-                {
-                    short events = 0;
-                    lock (this.waiters)
-                    {
-                        foreach (var waiter in this.waiters)
-                        {
-                            events |= waiter.Events;
-                        }
-                    }
-
-                    return events;
-                }
-            }
+            /// <summary>
+            /// The union of what every waiter is waiting for.
+            /// </summary>
+            /// <remarks>
+            /// Maintained as waiters come and go rather than recomputed. The loop reads this for
+            /// every registration on every wakeup WHILE HOLDING the global lock -- the same lock
+            /// each WaitAsync needs -- so walking the waiter list here made registration serialise
+            /// behind the loop's bookkeeping at exactly the session counts this feature is for.
+            /// </remarks>
+            internal short InterestedEvents => Volatile.Read(ref this.interestedEvents);
 
             internal Waiter Add(short events, TaskCompletionSource completion)
             {
@@ -335,6 +363,7 @@ namespace Porta.Pty.Unix
                 lock (this.waiters)
                 {
                     this.waiters.Add(waiter);
+                    this.interestedEvents |= events;
                 }
 
                 return waiter;
@@ -348,8 +377,23 @@ namespace Porta.Pty.Unix
                 lock (this.waiters)
                 {
                     this.waiters.Remove(waiter);
+                    this.Recompute();
                     return this.waiters.Count;
                 }
+            }
+
+            /// <summary>
+            /// Rebuilds the mask. Only on removal, where the union can shrink.
+            /// </summary>
+            private void Recompute()
+            {
+                short events = 0;
+                foreach (var waiter in this.waiters)
+                {
+                    events |= waiter.Events;
+                }
+
+                this.interestedEvents = events;
             }
 
             internal void Complete(short revents)
@@ -368,6 +412,8 @@ namespace Porta.Pty.Unix
                             this.waiters.RemoveAt(i);
                         }
                     }
+
+                    this.Recompute();
                 }
 
                 foreach (var completion in ready)
@@ -388,6 +434,7 @@ namespace Porta.Pty.Unix
                     }
 
                     this.waiters.Clear();
+                    this.interestedEvents = 0;
                 }
 
                 foreach (var completion in ready)

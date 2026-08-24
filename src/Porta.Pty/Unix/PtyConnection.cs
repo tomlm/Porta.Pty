@@ -19,6 +19,7 @@ namespace Porta.Pty.Unix
         private const int ESRCH = 3;
 
         private readonly int controller;
+        private readonly PtyDescriptor descriptor;
         private readonly int pid;
         private readonly ManualResetEvent terminalProcessTerminatedEvent = new ManualResetEvent(false);
         private int exitCode;
@@ -74,11 +75,13 @@ namespace Porta.Pty.Unix
 
                 // Both streams share the one descriptor, so the mode is a property of the connection
                 // rather than of either stream.
-                this.ReaderStream = new NonBlockingPtyStream(controller, FileAccess.Read);
-                this.WriterStream = new NonBlockingPtyStream(controller, FileAccess.Write);
+                this.descriptor = new PtyDescriptor(controller);
+                this.ReaderStream = new NonBlockingPtyStream(this.descriptor, FileAccess.Read);
+                this.WriterStream = new NonBlockingPtyStream(this.descriptor, FileAccess.Write);
             }
             else
             {
+                this.descriptor = new PtyDescriptor(controller);
                 this.ReaderStream = new PtyStream(controller, FileAccess.Read);
                 this.WriterStream = new PtyStream(controller, FileAccess.Write);
             }
@@ -254,7 +257,10 @@ namespace Porta.Pty.Unix
         {
             try
             {
-                this.Close(this.controller);
+                // Through the descriptor, so the close waits for any transfer already inside a
+                // read(2) or write(2) to finish. Closing underneath one would let the number be
+                // reissued while a syscall is still using it.
+                this.descriptor.Close(this.Close);
             }
             catch
             {

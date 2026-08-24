@@ -24,13 +24,13 @@ namespace Porta.Pty.Unix
     /// </remarks>
     internal sealed class NonBlockingPtyStream : Stream
     {
-        private readonly int fd;
+        private readonly PtyDescriptor descriptor;
         private readonly FileAccess access;
         private int disposed;
 
-        internal NonBlockingPtyStream(int fd, FileAccess access)
+        internal NonBlockingPtyStream(PtyDescriptor descriptor, FileAccess access)
         {
-            this.fd = fd;
+            this.descriptor = descriptor;
             this.access = access;
         }
 
@@ -68,7 +68,7 @@ namespace Porta.Pty.Unix
 
                 if (error == EAgain)
                 {
-                    await PtyPoller.Instance.WaitReadableAsync(this.fd, cancellationToken).ConfigureAwait(false);
+                    await PtyPoller.Instance.WaitReadableAsync(this.descriptor.Raw, cancellationToken).ConfigureAwait(false);
 
                     // Re-checked after the wait, not only before it. Dispose completes pending
                     // waiters through Unregister, so without this the loop woke, saw EAGAIN again,
@@ -119,7 +119,7 @@ namespace Porta.Pty.Unix
 
                 if (error == EAgain)
                 {
-                    await PtyPoller.Instance.WaitWritableAsync(this.fd, cancellationToken).ConfigureAwait(false);
+                    await PtyPoller.Instance.WaitWritableAsync(this.descriptor.Raw, cancellationToken).ConfigureAwait(false);
                     this.ThrowIfDisposed();
                     continue;
                 }
@@ -153,7 +153,7 @@ namespace Porta.Pty.Unix
                 // The descriptor belongs to the connection, which closes it. Only the poller's
                 // interest is ours to drop -- and it has to be dropped, because poll() reports a
                 // closed descriptor as POLLNVAL on every pass, which is a spin rather than an error.
-                PtyPoller.Instance.Unregister(this.fd);
+                PtyPoller.Instance.Unregister(this.descriptor.Raw);
             }
 
             base.Dispose(disposing);
@@ -180,20 +180,37 @@ namespace Porta.Pty.Unix
         private unsafe int TryTransfer(byte[] buffer, int offset, int count, bool reading, out int error)
         {
             error = 0;
-            fixed (byte* p = buffer)
+
+            // Reference-counted for the duration of the syscall, not merely flag-checked before it.
+            // The connection owns this descriptor and closes it; without the reference, a close
+            // landing between the check and the syscall could see the number reissued to something
+            // else, and this would then read or WRITE that instead. See PtyDescriptor.
+            if (!this.descriptor.TryAcquire())
             {
-                IntPtr result = reading
-                    ? read(this.fd, (IntPtr)(p + offset), (UIntPtr)(uint)count)
-                    : write(this.fd, (IntPtr)(p + offset), (UIntPtr)(uint)count);
+                throw new ObjectDisposedException(nameof(NonBlockingPtyStream));
+            }
 
-                long value = result.ToInt64();
-                if (value >= 0)
+            try
+            {
+                fixed (byte* p = buffer)
                 {
-                    return (int)value;
-                }
+                    IntPtr result = reading
+                        ? read(this.descriptor.Raw, (IntPtr)(p + offset), (UIntPtr)(uint)count)
+                        : write(this.descriptor.Raw, (IntPtr)(p + offset), (UIntPtr)(uint)count);
 
-                error = Marshal.GetLastPInvokeError();
-                return -1;
+                    long value = result.ToInt64();
+                    if (value >= 0)
+                    {
+                        return (int)value;
+                    }
+
+                    error = Marshal.GetLastPInvokeError();
+                    return -1;
+                }
+            }
+            finally
+            {
+                this.descriptor.Release();
             }
         }
     }

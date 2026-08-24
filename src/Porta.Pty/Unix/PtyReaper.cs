@@ -5,6 +5,7 @@ namespace Porta.Pty.Unix
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
@@ -150,10 +151,14 @@ namespace Porta.Pty.Unix
                         this.CollectIfExited(pids[i]);
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Nothing useful to do with a failure here, and letting it escape would end the
-                    // watch for every session in the process. Pause rather than spin.
+                    // Catching is right; the silence was not. A failure that persists here means
+                    // children are never reaped and WaitForExit never returns -- which is exactly
+                    // the "a fallback that hides a hang is worse than none" failure this design
+                    // rejects a polling fallback to avoid. Letting it escape would end the watch
+                    // for every session in the process, so it is logged and retried instead.
+                    Debug.WriteLine($"Porta.Pty reaper: exit watch failed ({ex.GetType().Name}: {ex.Message}); retrying.");
                     await Task.Delay(RetryDelay).ConfigureAwait(false);
                 }
             }
@@ -192,8 +197,9 @@ namespace Porta.Pty.Unix
                         break;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Debug.WriteLine($"Porta.Pty reaper: reaping {pid} threw ({ex.GetType().Name}: {ex.Message}).");
                     result = -1;
                     break;
                 }
@@ -228,9 +234,12 @@ namespace Porta.Pty.Unix
             {
                 entry.OnExited(status);
             }
-            catch
+            catch (Exception ex)
             {
-                // A consumer's exit handler throwing is not ours to propagate.
+                // A consumer's exit handler throwing is not ours to propagate, but it should not
+                // vanish either: it runs on the shared watch, where an exception nobody sees looks
+                // exactly like an exit that never happened.
+                Debug.WriteLine($"Porta.Pty reaper: ProcessExited handler threw ({ex.GetType().Name}: {ex.Message}).");
             }
         }
 

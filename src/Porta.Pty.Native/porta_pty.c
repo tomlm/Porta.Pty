@@ -431,11 +431,23 @@ PTY_EXPORT int pty_exit_drain(int queue, int *pids, int max)
     int want = max < 64 ? max : 64;
     struct timespec zero = {0, 0};
     int n = kevent(queue, NULL, 0, events, want, &zero);
+    int out = 0;
     for (int i = 0; i < n; i++)
     {
-        pids[i] = (int)events[i].ident;
+        /*
+         * An error entry carries EV_ERROR in flags, the errno in data, and the pid it failed for in
+         * ident -- so without this it would be reported as that pid having exited. Registration
+         * errors come back through pty_exit_watch's return value instead, because it passes
+         * nevents = 0, so this is defensive rather than a known path. It costs two lines.
+         */
+        if (events[i].flags & EV_ERROR)
+        {
+            continue;
+        }
+
+        pids[out++] = (int)events[i].ident;
     }
-    return n;
+    return out;
 #elif defined(SYS_pidfd_open)
     struct epoll_event events[64];
     int want = max < 64 ? max : 64;
