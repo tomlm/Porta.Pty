@@ -57,7 +57,7 @@ namespace Porta.Pty.Unix
                     throw new InvalidOperationException(
                         "Could not put the pty controller into non-blocking mode, which "
                         + $"{nameof(PtyOptions.UseAsyncIo)} requires (errno "
-                        + $"{Marshal.GetLastWin32Error()}).");
+                        + $"{Marshal.GetLastPInvokeError()}).");
                 }
 
                 if (!PtyReaper.Instance.IsSupported)

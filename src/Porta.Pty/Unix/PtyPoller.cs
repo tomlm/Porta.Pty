@@ -50,8 +50,20 @@ namespace Porta.Pty.Unix
 
             this.wakeupReadFd = fds[0];
             this.wakeupWriteFd = fds[1];
-            SetNonBlocking(this.wakeupReadFd);
-            SetNonBlocking(this.wakeupWriteFd);
+
+            // Both ends MUST be non-blocking, and the result was being discarded. Neither failure is
+            // benign: DrainWakeup reads until read(2) reports it would block, so a blocking read end
+            // parks the poller thread the first time the pipe empties and every registered session
+            // stops making progress. A blocking write end lets Wake() stall a caller once the pipe
+            // fills. Better to fail here, where it is one exception at first use, than to hang.
+            if (!SetNonBlocking(this.wakeupReadFd) || !SetNonBlocking(this.wakeupWriteFd))
+            {
+                int error = Marshal.GetLastPInvokeError();
+                close(this.wakeupReadFd);
+                close(this.wakeupWriteFd);
+                throw new InvalidOperationException(
+                    $"Could not put the poller wakeup pipe into non-blocking mode (errno {error}).");
+            }
 
             var thread = new Thread(this.Loop)
             {

@@ -469,8 +469,10 @@ namespace Porta.Pty.Windows
                     | NAMED_PIPE_MODE.PIPE_WAIT
                     | NAMED_PIPE_MODE.PIPE_REJECT_REMOTE_CLIENTS,
                 1,
-                // Unlike CreatePipe, zero here gives an overlapped writer no quota and its first
-                // write waits for a reader. This is the standard CreatePipeEx default.
+                // 4096 each way, NOT zero. Zero is legal and means "no quota", which for an
+                // overlapped writer makes the first write wait for a reader rather than complete
+                // immediately -- the opposite of what this pipe is for. 4096 is the size
+                // CreatePipeEx uses for the same reason.
                 4096,
                 4096,
                 0,
