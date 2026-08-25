@@ -32,6 +32,7 @@ namespace Porta.Pty.Windows
         private readonly object disposeLock = new object();
         private PseudoConsoleConnectionHandles? handles;
         private bool isDisposed;
+        private bool pseudoConsoleClosed;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="PseudoConsoleConnection"/> class.
@@ -152,7 +153,20 @@ namespace Porta.Pty.Windows
                 throw new ObjectDisposedException(nameof(PseudoConsoleConnection));
             }
 
-            handles.PseudoConsoleHandle.Resize(cols, rows);
+            lock (this.disposeLock)
+            {
+                if (this.pseudoConsoleClosed)
+                {
+                    // The child has exited and the pseudoconsole went with it, but this CONNECTION
+                    // is still alive and undisposed -- so throwing ObjectDisposedException here
+                    // would fault a caller who has disposed nothing. A terminal that resizes on
+                    // every window change hits this the moment a shell exits, before the pane is
+                    // torn down. There is nothing left to resize, so there is nothing to do.
+                    return;
+                }
+
+                handles.PseudoConsoleHandle.Resize(cols, rows);
+            }
         }
 
         /// <inheritdoc/>
@@ -186,6 +200,7 @@ namespace Porta.Pty.Windows
                     // of PseudoConsole.Dispose cannot interleave: its idempotence guard is a plain
                     // bool, safe only when calls are serialized.
                     this.handles.PseudoConsoleHandle.Dispose();
+                    this.pseudoConsoleClosed = true;
                 }
             }
 

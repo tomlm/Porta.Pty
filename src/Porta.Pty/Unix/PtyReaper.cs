@@ -97,23 +97,28 @@ namespace Porta.Pty.Unix
             // exited -- both kernels report that as ESRCH, indistinguishable here from anything
             // else. Collect it directly: an exit between spawning and watching is otherwise never
             // reported, and WaitForExit would wait on a process already gone.
-            this.CollectIfExited(pid);
+            if (this.Collect(pid, out int watchError) != ReapOutcome.Unwatchable)
+            {
+                // Either collected, or still running and successfully re-armed. Re-armed used to
+                // fall through and throw, failing a spawn whose child was by then correctly
+                // watched -- and removing the registration that watch depended on.
+                return;
+            }
 
             lock (this.gate)
             {
-                if (!this.children.ContainsKey(pid))
-                {
-                    return;
-                }
-
                 this.children.Remove(pid);
             }
 
             // Still running and still unwatchable, so nothing will ever reap it. There is no
             // polling fallback to fall back TO any more, and pretending otherwise would hand back
             // a connection whose WaitForExit never returns.
+            //
+            // The errno comes back from Collect rather than being read here: Collect calls waitpid,
+            // which sets it, so reading it at this point reported an unrelated failure in the
+            // message whose entire job is to name this one.
             throw new InvalidOperationException(
-                $"Could not watch pty child {pid} for exit (errno {Marshal.GetLastPInvokeError()}).");
+                $"Could not watch pty child {pid} for exit (errno {watchError}).");
         }
 
         /// <summary>
@@ -146,9 +151,23 @@ namespace Porta.Pty.Unix
                     await PtyPoller.Instance.WaitReadableAsync(this.queue, CancellationToken.None).ConfigureAwait(false);
 
                     int count = pty_exit_drain(this.queue, pids, pids.Length);
+
+                    if (count < 0)
+                    {
+                        // A failure, not an empty drain -- and the difference matters because the
+                        // waiter that woke us completes immediately on a broken queue descriptor
+                        // (poll reports POLLNVAL whether asked or not). Treating -1 as "no exits"
+                        // sent this straight back to the wait with no delay and nothing logged: a
+                        // spin at full CPU in which no child exit is ever reported again.
+                        Debug.WriteLine(
+                            $"Porta.Pty reaper: draining the exit queue failed with errno {Marshal.GetLastPInvokeError()}; retrying.");
+                        await Task.Delay(RetryDelay).ConfigureAwait(false);
+                        continue;
+                    }
+
                     for (var i = 0; i < count; i++)
                     {
-                        this.CollectIfExited(pids[i]);
+                        this.Collect(pids[i], out _);
                     }
                 }
                 catch (Exception ex)
@@ -165,16 +184,34 @@ namespace Porta.Pty.Unix
         }
 
         /// <summary>
-        /// Reaps one pid if it has exited, and reports it.
+        /// What became of a pid the reaper looked at.
         /// </summary>
-        private void CollectIfExited(int pid)
+        private enum ReapOutcome
         {
+            /// <summary>Exited and reported, or no longer this reaper's concern.</summary>
+            Collected,
+
+            /// <summary>Still running, and the watch is (still) armed for it.</summary>
+            Watched,
+
+            /// <summary>Still running, and it cannot be watched. Nothing will reap it.</summary>
+            Unwatchable,
+        }
+
+        /// <summary>
+        /// Reaps one pid if it has exited, re-arming the watch if it has not.
+        /// </summary>
+        /// <param name="pid">The child to look at.</param>
+        /// <param name="watchError">The errno from a failed re-arm, or 0.</param>
+        private ReapOutcome Collect(int pid, out int watchError)
+        {
+            watchError = 0;
             Entry? entry;
             lock (this.gate)
             {
                 if (!this.children.TryGetValue(pid, out entry))
                 {
-                    return;
+                    return ReapOutcome.Collected;
                 }
             }
 
@@ -207,15 +244,21 @@ namespace Porta.Pty.Unix
 
             if (result == 0)
             {
-                // Reported as exited but not collectable, which should not happen: both mechanisms
-                // fire only once the process is gone. Re-arm rather than assume, since the one-shot
-                // notification has already been spent and dropping it here loses the child.
-                if (this.queue >= 0 && pty_exit_watch(this.queue, pid) != 0)
+                // Still running. The one-shot notification has already been spent, so the watch has
+                // to be re-armed or the child is lost.
+                //
+                // Returns the outcome rather than recursing, which is what this did before: on a
+                // child that stays running while the re-arm keeps failing -- pidfd_open under
+                // EMFILE, say -- nothing changed between iterations, so it recursed until the stack
+                // ran out and took the host process down with a StackOverflowException, in place of
+                // the InvalidOperationException it was supposed to raise.
+                if (this.queue >= 0 && pty_exit_watch(this.queue, pid) == 0)
                 {
-                    this.CollectIfExited(pid);
+                    return ReapOutcome.Watched;
                 }
 
-                return;
+                watchError = Marshal.GetLastPInvokeError();
+                return ReapOutcome.Unwatchable;
             }
 
             lock (this.gate)
@@ -227,7 +270,7 @@ namespace Porta.Pty.Unix
             {
                 // ECHILD: something else collected it and there is no status to be had. Reporting
                 // the zero would claim the child succeeded.
-                return;
+                return ReapOutcome.Collected;
             }
 
             try
@@ -241,6 +284,8 @@ namespace Porta.Pty.Unix
                 // exactly like an exit that never happened.
                 Debug.WriteLine($"Porta.Pty reaper: ProcessExited handler threw ({ex.GetType().Name}: {ex.Message}).");
             }
+
+            return ReapOutcome.Collected;
         }
 
         private sealed class Entry
