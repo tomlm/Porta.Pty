@@ -32,12 +32,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Built inside AlmaLinux 8 (glibc 2.28) rather than on the runner. glibc 2.34 folded
-      # libutil into libc and gave forkpty a new symbol version, so anything compiled on a
-      # modern runner demands forkpty@GLIBC_2.34 and will not LOAD on RHEL 8 and its
-      # derivatives -- which .NET 10 supports. Nothing here needs a recent glibc: built this
-      # way the floor is GLIBC_2.14, and binaries built against an old glibc run fine on new
-      # ones. Measured both directions before making this change.
+      # Built on glibc 2.28 so the shim loads on RHEL 8. glibc 2.34 folded libutil into libc
+      # and re-versioned forkpty, which is the only symbol that was forcing a modern floor.
       - name: Build native PTY shim (glibc 2.28 container)
         run: |
           docker run --rm -v "$PWD":/src -w /src almalinux:8 bash -c '
@@ -49,9 +45,7 @@ jobs:
           '
           sudo chown -R "$(id -u):$(id -g)" src/Porta.Pty.Native/output || true
 
-      # The floor is the whole point of the step above, so it is asserted rather than assumed.
-      # Without this, a future runner or base-image bump raises it again silently -- which is
-      # exactly how it reached 2.34 unnoticed and stayed there since 1.0.7.
+      # Asserted, or a future runner or base-image bump raises it again unnoticed, as 2.34 was.
       - name: Assert the glibc floor
         run: |
           so=$(find src/Porta.Pty.Native/output -name 'libporta_pty.so' | head -1)
@@ -77,12 +71,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Built inside AlmaLinux 8 (glibc 2.28) rather than on the runner. glibc 2.34 folded
-      # libutil into libc and gave forkpty a new symbol version, so anything compiled on a
-      # modern runner demands forkpty@GLIBC_2.34 and will not LOAD on RHEL 8 and its
-      # derivatives -- which .NET 10 supports. Nothing here needs a recent glibc: built this
-      # way the floor is GLIBC_2.14, and binaries built against an old glibc run fine on new
-      # ones. Measured both directions before making this change.
+      # Built on glibc 2.28 so the shim loads on RHEL 8. glibc 2.34 folded libutil into libc
+      # and re-versioned forkpty, which is the only symbol that was forcing a modern floor.
       - name: Build native PTY shim (glibc 2.28 container)
         run: |
           docker run --rm -v "$PWD":/src -w /src almalinux:8 bash -c '
@@ -94,9 +84,7 @@ jobs:
           '
           sudo chown -R "$(id -u):$(id -g)" src/Porta.Pty.Native/output || true
 
-      # The floor is the whole point of the step above, so it is asserted rather than assumed.
-      # Without this, a future runner or base-image bump raises it again silently -- which is
-      # exactly how it reached 2.34 unnoticed and stayed there since 1.0.7.
+      # Asserted, or a future runner or base-image bump raises it again unnoticed, as 2.34 was.
       - name: Assert the glibc floor
         run: |
           so=$(find src/Porta.Pty.Native/output -name 'libporta_pty.so' | head -1)

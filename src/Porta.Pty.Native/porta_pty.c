@@ -22,20 +22,13 @@
     #include <sys/syscall.h>
 
 /*
- * pidfd_open's syscall NUMBER, when the build machine's headers are too old to name it.
+ * pidfd_open's syscall number, when the build machine's headers are too old to name it. The shim is
+ * built on glibc 2.28 so it loads on RHEL 8, and those headers predate pidfd_open -- gating on
+ * SYS_pidfd_open being DEFINED would compile the feature out for every target. Support is a runtime
+ * question, and pty_exit_queue probes for it.
  *
- * Gating on SYS_pidfd_open being defined gates on the BUILD machine's kernel headers, which says
- * nothing about the kernel the binary will run on -- and the two are deliberately different here:
- * the shim is compiled on glibc 2.28 so it loads on RHEL 8, and those headers are 4.18-era, so the
- * feature compiled itself out and UseAsyncIo then refused on every Linux, modern kernels included.
- *
- * This is the same compile-time-versus-runtime mistake that an earlier revision made in the other
- * direction, where a binary built on a modern image assumed a capability the target did not have.
- * Support is a RUNTIME question in both directions, and pty_exit_queue already probes for it.
- *
- * 434 on x86_64 and aarch64, which are the only Linux architectures shipped. Deliberately not
- * defined for others: the number is not universal, and guessing it would be worse than the ENOSYS
- * the fallback below produces.
+ * 434 on x86_64 and aarch64, the only Linux architectures shipped; not defined elsewhere, because
+ * the number is not universal and guessing is worse than the ENOSYS below.
  */
 #if !defined(SYS_pidfd_open) && (defined(__x86_64__) || defined(__aarch64__))
     #define SYS_pidfd_open 434
@@ -355,19 +348,13 @@ PTY_EXPORT int pty_set_nonblocking(int fd)
 /*
  * Exit notification without polling.
  *
- * The reaper polls waitpid(WNOHANG) every 100ms, which costs latency on WaitForExit and
- * ProcessExited and a thread to do it on. Both kernels can tell us instead, and both can do it
- * through a single POLLABLE descriptor -- which means the existing pty poll(2) loop can carry it and
- * the reaper thread stops existing.
+ * waitpid every 100ms cost latency on WaitForExit and a thread to poll on. Both kernels report an
+ * exit through a POLLABLE descriptor instead, so the pty poll(2) loop carries it and the reaper
+ * thread stops existing: one kqueue holding EVFILT_PROC/NOTE_EXIT per pid on macOS, one epoll
+ * holding a pidfd per pid on Linux.
  *
- * The two mechanisms are shaped differently and are wrapped into one here:
- *   macOS  one kqueue holds an EVFILT_PROC/NOTE_EXIT registration per pid.
- *   Linux  one epoll holds a pidfd per pid. pidfd_open needs Linux 5.3, and had no glibc wrapper
- *          before 2.36, so it goes through syscall() -- which is variadic, and therefore exactly
- *          the thing that must not be called from a P/Invoke. See pty_set_nonblocking.
- *
- * pty_exit_queue returns -1 when this kernel cannot do it, which the caller reports as an
- * unsupported platform rather than silently doing something slower.
+ * pty_exit_queue returns -1 when the kernel cannot do it, which the caller reports as unsupported
+ * rather than silently doing something slower.
  */
 PTY_EXPORT int pty_exit_queue(void)
 {
@@ -375,13 +362,9 @@ PTY_EXPORT int pty_exit_queue(void)
     return kqueue();
 #elif defined(SYS_pidfd_open)
     /*
-     * PROBE pidfd_open, do not merely compile against it. SYS_pidfd_open is a property of the
-     * build machine's headers, and epoll_create1 succeeds on every kernel -- so testing either one
-     * says nothing about whether the kernel running this binary can do the thing. Built on a
-     * modern CI image and run on a 4.18 kernel, both tests pass and every syscall that matters
-     * then fails at the point of use.
-     *
-     * Opening a descriptor to ourselves answers the question directly and costs one syscall, once.
+     * PROBE, do not merely compile against it: epoll_create1 succeeds on every kernel and
+     * SYS_pidfd_open describes the build machine, so neither says whether THIS kernel can do it.
+     * One syscall, once.
      */
     int probe = (int)syscall(SYS_pidfd_open, getpid(), 0);
     if (probe == -1)
