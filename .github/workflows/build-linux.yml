@@ -27,16 +27,37 @@ jobs:
       with:
         dotnet-version: 10.0.x
 
-    - name: Install native build dependencies
+    # Built inside AlmaLinux 8 (glibc 2.28) rather than on the runner. glibc 2.34 folded
+    # libutil into libc and gave forkpty a new symbol version, so anything compiled on a
+    # modern runner demands forkpty@GLIBC_2.34 and will not LOAD on RHEL 8 and its
+    # derivatives -- which .NET 10 supports. Nothing here needs a recent glibc: built this
+    # way the floor is GLIBC_2.14, and binaries built against an old glibc run fine on new
+    # ones. Measured both directions before making this change.
+    - name: Build native PTY shim (glibc 2.28 container)
       run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake build-essential
+        docker run --rm -v "$PWD":/src -w /src almalinux:8 bash -c '
+          set -e
+          dnf install -y -q gcc cmake make
+          cd src/Porta.Pty.Native
+          chmod +x build.sh
+          ./build.sh
+        '
+        sudo chown -R "$(id -u):$(id -g)" src/Porta.Pty.Native/output || true
 
-    - name: Build native PTY shim
+    # The floor is the whole point of the step above, so it is asserted rather than assumed.
+    # Without this, a future runner or base-image bump raises it again silently -- which is
+    # exactly how it reached 2.34 unnoticed and stayed there since 1.0.7.
+    - name: Assert the glibc floor
       run: |
-        cd src/Porta.Pty.Native
-        chmod +x build.sh
-        ./build.sh
+        so=$(find src/Porta.Pty.Native/output -name 'libporta_pty.so' | head -1)
+        echo "checking $so"
+        readelf -V "$so" | grep -o 'GLIBC_[0-9.]*' | sort -u -V | tail -1
+        if readelf --dyn-syms "$so" | grep -qE 'GLIBC_2\.(3[0-9]|[4-9][0-9])'; then
+          echo "::error::shim requires a glibc newer than 2.28; RHEL 8 cannot load it"
+          readelf --dyn-syms "$so" | grep -E 'GLIBC_2\.(3[0-9]|[4-9][0-9])'
+          exit 1
+        fi
+        echo "no symbol above glibc 2.29 -- loads on RHEL 8"
 
     - name: Restore dependencies
       run: dotnet restore src/Porta.Pty.sln
