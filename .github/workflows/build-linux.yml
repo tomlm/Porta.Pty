@@ -44,15 +44,18 @@ jobs:
     - name: Assert the glibc floor
       run: |
         so=$(find src/Porta.Pty.Native/output -name 'libporta_pty.so' | head -1)
+        [ -n "$so" ] || { echo "::error::no libporta_pty.so was produced"; exit 1; }
         echo "checking $so"
-        readelf -V "$so" | grep -o 'GLIBC_[0-9.]*' | sort -u -V | tail -1
-        if readelf --dyn-syms "$so" | grep -qE 'GLIBC_2\.(3[0-9]|[4-9][0-9])'; then
-          echo "::error::shim requires a glibc newer than 2.28; RHEL 8 cannot load it"
-          readelf --dyn-syms "$so" | grep -E 'GLIBC_2\.(3[0-9]|[4-9][0-9])'
+        highest=$(readelf -V "$so" | grep -o 'GLIBC_[0-9.]*' | sort -u -V | tail -1)
+        echo "highest required: $highest"
+        # Version-compared against 2.28 rather than pattern-matched: a regex for "too new" has to be
+        # revised every time glibc numbers grow, and got 2.29 wrong on the first attempt.
+        if [ "$( { echo "$highest"; echo GLIBC_2.28; } | sort -V | tail -1 )" != "GLIBC_2.28" ]; then
+          echo "::error::shim requires $highest; RHEL 8 has glibc 2.28 and cannot load it"
+          readelf --dyn-syms "$so" | grep "$highest"
           exit 1
         fi
-        echo "no symbol above glibc 2.29 -- loads on RHEL 8"
-
+        echo "loads on RHEL 8 (glibc 2.28)"
     - name: Restore dependencies
       run: dotnet restore src/Porta.Pty.sln
 
