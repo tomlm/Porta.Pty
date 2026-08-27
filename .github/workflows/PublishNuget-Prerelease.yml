@@ -32,17 +32,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install native build dependencies
+      # Built on glibc 2.28 so the shim loads on RHEL 8. glibc 2.34 folded libutil into libc
+      # and re-versioned forkpty, which is the only symbol that was forcing a modern floor.
+      - name: Build native PTY shim (glibc 2.28 container)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential
+          docker run --rm -v "$PWD":/src -w /src almalinux:8 bash -c '
+            set -e
+            dnf install -y -q gcc cmake make
+            cd src/Porta.Pty.Native
+            chmod +x build.sh
+            ./build.sh
+          '
+          sudo chown -R "$(id -u):$(id -g)" src/Porta.Pty.Native/output || true
 
-      - name: Build native PTY shim
+      # Asserted, or a future runner or base-image bump raises it again unnoticed, as 2.34 was.
+      - name: Assert the glibc floor
         run: |
-          cd src/Porta.Pty.Native
-          chmod +x build.sh
-          ./build.sh
-
+          so=$(find src/Porta.Pty.Native/output -name 'libporta_pty.so' | head -1)
+          [ -n "$so" ] || { echo "::error::no libporta_pty.so was produced"; exit 1; }
+          echo "checking $so"
+          highest=$(readelf -V "$so" | grep -o 'GLIBC_[0-9.]*' | sort -u -V | tail -1)
+          echo "highest required: $highest"
+          # Version-compared against 2.28 rather than pattern-matched: a regex for "too new" has to be
+          # revised every time glibc numbers grow, and got 2.29 wrong on the first attempt.
+          if [ "$( { echo "$highest"; echo GLIBC_2.28; } | sort -V | tail -1 )" != "GLIBC_2.28" ]; then
+            echo "::error::shim requires $highest; RHEL 8 has glibc 2.28 and cannot load it"
+            readelf --dyn-syms "$so" | grep "$highest"
+            exit 1
+          fi
+          echo "loads on RHEL 8 (glibc 2.28)"
       - name: Upload native library
         uses: actions/upload-artifact@v4
         with:
@@ -56,17 +74,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install native build dependencies
+      # Built on glibc 2.28 so the shim loads on RHEL 8. glibc 2.34 folded libutil into libc
+      # and re-versioned forkpty, which is the only symbol that was forcing a modern floor.
+      - name: Build native PTY shim (glibc 2.28 container)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential
+          docker run --rm -v "$PWD":/src -w /src almalinux:8 bash -c '
+            set -e
+            dnf install -y -q gcc cmake make
+            cd src/Porta.Pty.Native
+            chmod +x build.sh
+            ./build.sh
+          '
+          sudo chown -R "$(id -u):$(id -g)" src/Porta.Pty.Native/output || true
 
-      - name: Build native PTY shim
+      # Asserted, or a future runner or base-image bump raises it again unnoticed, as 2.34 was.
+      - name: Assert the glibc floor
         run: |
-          cd src/Porta.Pty.Native
-          chmod +x build.sh
-          ./build.sh
-
+          so=$(find src/Porta.Pty.Native/output -name 'libporta_pty.so' | head -1)
+          [ -n "$so" ] || { echo "::error::no libporta_pty.so was produced"; exit 1; }
+          echo "checking $so"
+          highest=$(readelf -V "$so" | grep -o 'GLIBC_[0-9.]*' | sort -u -V | tail -1)
+          echo "highest required: $highest"
+          # Version-compared against 2.28 rather than pattern-matched: a regex for "too new" has to be
+          # revised every time glibc numbers grow, and got 2.29 wrong on the first attempt.
+          if [ "$( { echo "$highest"; echo GLIBC_2.28; } | sort -V | tail -1 )" != "GLIBC_2.28" ]; then
+            echo "::error::shim requires $highest; RHEL 8 has glibc 2.28 and cannot load it"
+            readelf --dyn-syms "$so" | grep "$highest"
+            exit 1
+          fi
+          echo "loads on RHEL 8 (glibc 2.28)"
       - name: Upload native library
         uses: actions/upload-artifact@v4
         with:
