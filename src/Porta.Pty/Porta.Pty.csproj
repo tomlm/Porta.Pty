@@ -4,6 +4,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Turns on the trim, single-file and AOT analyzers, and marks the assembly trimmable so a
+         consumer publishing Native AOT is not warned about referencing it. The AotDemo sample
+         already publishes and RUNS under AOT in CI, so this declares a property that was being
+         demonstrated but not stated. -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <PropertyGroup>
     <Description>Cross platform (windows/linux/macos) Pty library for communicating with console applications. Uses native shim for .NET 7+ compatibility (no DOTNET_EnableWriteXorExecute required).</Description>
