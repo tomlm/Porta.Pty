@@ -20,6 +20,26 @@
     #include <pty.h>
     #include <sys/epoll.h>
     #include <sys/syscall.h>
+
+/*
+ * pidfd_open's syscall NUMBER, when the build machine's headers are too old to name it.
+ *
+ * Gating on SYS_pidfd_open being defined gates on the BUILD machine's kernel headers, which says
+ * nothing about the kernel the binary will run on -- and the two are deliberately different here:
+ * the shim is compiled on glibc 2.28 so it loads on RHEL 8, and those headers are 4.18-era, so the
+ * feature compiled itself out and UseAsyncIo then refused on every Linux, modern kernels included.
+ *
+ * This is the same compile-time-versus-runtime mistake that an earlier revision made in the other
+ * direction, where a binary built on a modern image assumed a capability the target did not have.
+ * Support is a RUNTIME question in both directions, and pty_exit_queue already probes for it.
+ *
+ * 434 on x86_64 and aarch64, which are the only Linux architectures shipped. Deliberately not
+ * defined for others: the number is not universal, and guessing it would be worse than the ENOSYS
+ * the fallback below produces.
+ */
+#if !defined(SYS_pidfd_open) && (defined(__x86_64__) || defined(__aarch64__))
+    #define SYS_pidfd_open 434
+#endif
 #endif
 
 #include <stdlib.h>
