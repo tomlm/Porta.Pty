@@ -1,0 +1,45 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    # No `synchronize`. That fires on every push to a PR, so a branch pushed five times gets
+    # five reviews of overlapping diffs. Once when it opens and once when it leaves draft is
+    # when a review is actually worth reading; push a fresh @claude comment for anything else.
+    types: [opened, ready_for_review, reopened]
+
+jobs:
+  claude-review:
+    # Reviewable pull requests only. Three cases this cannot or should not review:
+    #   head.repo.fork -- a FORK pull request. GitHub gives these a read-only token, no
+    #                     id-token: write and NO SECRETS, so ANTHROPIC_API_KEY arrives
+    #                     empty and the action dies on OIDC. Not fixable by permissions;
+    #                     pull_request_target would fix it by running fork code WITH the
+    #                     secrets, which is worse than no review.
+    #   user.type      -- the PR was OPENED by a bot (Copilot and friends).
+    #   github.actor   -- a human's PR that Claude then PUSHED to. The push fires
+    #                     `synchronize`, and Claude would review its own commit.
+    # All three are still reviewable on demand: comment @claude on the PR. That runs on
+    # issue_comment, which is a base-repo event and does get the secrets.
+    if: github.event.pull_request.head.repo.fork == false && github.event.pull_request.user.type != 'Bot' && github.actor != 'claude[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          # The Action does NOT read .claude/settings.json -- claude_args is what gates it.
+          claude_args: '--allowedTools "Bash(dotnet:*),Bash(gh pr edit:*),Bash(gh pr ready:*),Bash(gh pr view:*)"'
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
