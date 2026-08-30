@@ -18,6 +18,7 @@ namespace Porta.Pty.Unix
         private const int ECHILD = 10;
         private const int ESRCH = 3;
 
+        private readonly bool useAsyncIo;
         private readonly int controller;
         private readonly PtyDescriptor descriptor;
         private readonly int pid;
@@ -86,6 +87,7 @@ namespace Porta.Pty.Unix
                 this.WriterStream = new PtyStream(controller, FileAccess.Write);
             }
 
+            this.useAsyncIo = useAsyncIo;
             this.controller = controller;
             this.pid = pid;
             if (useAsyncIo)
@@ -113,6 +115,9 @@ namespace Porta.Pty.Unix
 
         /// <inheritdoc/>
         public Stream ReaderStream { get; }
+
+        /// <inheritdoc/>
+        public bool SupportsCancellableRead => this.useAsyncIo;
 
         /// <inheritdoc/>
         public Stream WriterStream { get; }

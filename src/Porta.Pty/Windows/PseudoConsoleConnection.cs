@@ -78,6 +78,9 @@ namespace Porta.Pty.Windows
         public Stream ReaderStream { get; }
 
         /// <inheritdoc/>
+        public bool SupportsCancellableRead => this.handles?.UseAsyncIo == true;
+
+        /// <inheritdoc/>
         public Stream WriterStream { get; }
 
         /// <inheritdoc/>
