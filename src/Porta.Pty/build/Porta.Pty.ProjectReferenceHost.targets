@@ -1,0 +1,63 @@
+<Project>
+
+  <!--
+    Stage OpenConsole.exe for a PROJECT REFERENCE consumer.
+
+    Porta.Pty.targets does this for package consumers, and cannot do it for these: it runs in the
+    consumer's build, and a project reference imports none of our build/ files. So the staging has to
+    happen in OUR build, and land in a layout the consumer inherits.
+
+    What the consumer inherits is the point. ConptyRequires*Host puts the hosts at our output ROOT,
+    which reaches the consumer's root — right for a RID-specific consumer, where conpty.dll is
+    flattened to the root beside them. A PORTABLE consumer keeps the runtimes/ tree, so its conpty.dll
+    lands in runtimes/win-x64/native/ with the hosts still at the root: apart, which is the one
+    arrangement that does not work. conpty.dll looks for its host BESIDE ITSELF, finds nothing, and
+    falls back to in-box conhost without failing or warning.
+
+    That fallback is invisible until the consumer is a terminal emulator. conhost DRAWS the child's
+    output instead of relaying it, so every sequence it does not model is consumed on the way past.
+    Measured with a child emitting one query per family through a portable project-reference consumer:
+    CSI arrived; XTGETTCAP, DECRQSS, OSC 10/11, OSC 52 and the Kitty graphics APC did not. The child
+    concludes the terminal cannot do any of it.
+
+    So both layouts are staged, and the consumer uses whichever matches the build it did. The cost is
+    the hosts twice in a project-reference output, which is a development build by definition.
+
+    None with Link, NOT ReferenceCopyLocalPaths, and the difference is the whole reason this file
+    exists. A project reference propagates through GetCopyToOutputDirectoryItems, which reads items
+    assigned a target path at EVALUATION time; ReferenceCopyLocalPaths added by a target reaches our
+    own output and stops there. Measured: staged that way, our bin had
+    runtimes/win-x64/native/x64/OpenConsole.exe and the consumer's did not.
+  -->
+
+  <!--
+    PkgMicrosoft_Windows_Console_ConPTY comes from GeneratePathProperty on the PackageReference, and
+    names the package directory that RESTORE actually chose. Composing the path instead — package root
+    plus id plus version — needs the version as a literal, which is a second place to update when the
+    reference moves and no error when it is missed: Exists() goes false, no item is created, and the
+    build succeeds having staged nothing.
+
+    Skipped when THIS project is built RID-specific, where native assets flatten to the root and
+    ConptyRequires*Host has already put the hosts there. That is a narrower saving than it looks: a
+    consumer's RuntimeIdentifier does not reach this build — measured, a clean win-x64 consumer builds
+    Porta.Pty portable and receives both copies. So a RID consumer carries 2.1MB it will not load, and
+    the cure for that is a build-time question this file cannot see the answer to.
+  -->
+  <ItemGroup Condition="'$(PortaPtyStageProjectReferenceHost)' != 'false' And '$(RuntimeIdentifier)' == ''">
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)/build/native/runtimes/x64/OpenConsole.exe"
+          Condition="Exists('$(PkgMicrosoft_Windows_Console_ConPTY)/build/native/runtimes/x64/OpenConsole.exe')">
+      <Link>runtimes\win-x64\native\x64\OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Pack>false</Pack>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)/build/native/runtimes/arm64/OpenConsole.exe"
+          Condition="Exists('$(PkgMicrosoft_Windows_Console_ConPTY)/build/native/runtimes/arm64/OpenConsole.exe')">
+      <Link>runtimes\win-arm64\native\arm64\OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Pack>false</Pack>
+    </None>
+  </ItemGroup>
+
+</Project>
