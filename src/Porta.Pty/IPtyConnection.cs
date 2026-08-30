@@ -22,6 +22,23 @@ namespace Porta.Pty
         Stream ReaderStream { get; }
 
         /// <summary>
+        /// Gets a value indicating whether <see cref="ReaderStream"/>'s <c>ReadAsync</c> honours its
+        /// cancellation token while waiting for data — returning without consuming a byte and
+        /// without the stream having to be closed.
+        /// </summary>
+        /// <remarks>
+        /// <para>True only for connections opened with <see cref="PtyOptions.UseAsyncIo"/>. A
+        /// blocking-mode read can only be interrupted by closing the stream underneath it, which is
+        /// exactly what a host handing the connection to a new owner cannot do — so a host that
+        /// wants to stop reading without tearing the connection down needs to know which kind it
+        /// holds. The stream types themselves are internal, so this is the one place the answer is
+        /// visible.</para>
+        /// <para>A default interface implementation, so existing implementers keep compiling; false
+        /// is the safe answer, since callers fall back to blocking-read semantics.</para>
+        /// </remarks>
+        bool SupportsCancellableRead => false;
+
+        /// <summary>
         /// Gets the stream for writing data to the pty.
         /// </summary>
         Stream WriterStream { get; }
