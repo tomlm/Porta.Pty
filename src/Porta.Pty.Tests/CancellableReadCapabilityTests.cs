@@ -26,17 +26,24 @@ namespace Porta.Pty.Tests
     {
         private const int TestTimeoutMs = 30_000;
 
-        private static PtyOptions ShellOptions(string name, bool useAsyncIo) => new PtyOptions
+        /// <summary>
+        /// The shape every passing Windows test in this suite uses: the FULL PATH to cmd.exe and a
+        /// verbatim ["/c", command]. A bare "cmd.exe" with composed quoting died at spawn under
+        /// ConPTY, which surfaced as EOF on the very first read.
+        /// </summary>
+        private static PtyOptions ShellOptions(string name, bool useAsyncIo, string? unixCommand = null, string? windowsCommand = null) => new PtyOptions
         {
             Name = name,
             Cols = 80,
             Rows = 25,
             Cwd = Environment.CurrentDirectory,
-            App = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+            App = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.SystemDirectory, "cmd.exe")
+                : "/bin/sh",
             CommandLine = OperatingSystem.IsWindows()
-                ? Array.Empty<string>()
-                : new[] { "-c", "while :; do sleep 1; done" },
-            VerbatimCommandLine = !OperatingSystem.IsWindows(),
+                ? new[] { "/c", windowsCommand ?? "ping -n 30 127.0.0.1 >NUL" }
+                : new[] { "-c", unixCommand ?? "while :; do sleep 1; done" },
+            VerbatimCommandLine = true,
             Environment = new Dictionary<string, string>(),
             UseAsyncIo = useAsyncIo,
         };
@@ -79,19 +86,12 @@ namespace Porta.Pty.Tests
         public async Task Cancelling_a_pending_read_consumes_nothing()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
-            var options = ShellOptions("CapCancel", useAsyncIo: true);
-
             // Quiet for a while, speak the marker once, then stay alive so EOF cannot race the test.
-            if (OperatingSystem.IsWindows())
-            {
-                options.App = "cmd.exe";
-                options.CommandLine = new[] { "/c", "ping -n 4 127.0.0.1 >NUL & echo AFTERCANCEL& ping -n 31 127.0.0.1 >NUL" };
-                options.VerbatimCommandLine = false;
-            }
-            else
-            {
-                options.CommandLine = new[] { "-c", "sleep 3; printf AFTERCANCEL; sleep 30" };
-            }
+            var options = ShellOptions(
+                "CapCancel",
+                useAsyncIo: true,
+                unixCommand: "sleep 3; printf AFTERCANCEL; sleep 30",
+                windowsCommand: "ping -n 4 127.0.0.1 >NUL & echo AFTERCANCEL& ping -n 31 127.0.0.1 >NUL");
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
             var buffer = new byte[4096];
