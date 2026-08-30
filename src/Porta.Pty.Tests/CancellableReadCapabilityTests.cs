@@ -65,27 +65,56 @@ namespace Porta.Pty.Tests
         /// stream being closed, and the data that arrives afterwards is still there to be read.
         /// </summary>
         /// <remarks>
-        /// This is the whole point. If cancellation consumed the bytes in flight, or worked only by
-        /// closing the stream, a handover would still lose data -- the capability would be
-        /// advertising semantics it does not have.
+        /// <para>This is the whole point. If cancellation consumed the bytes in flight, or worked
+        /// only by closing the stream, a handover would still lose data — the capability would be
+        /// advertising semantics it does not have.</para>
+        /// <para>The read is parked only AFTER the initial output has been drained, because "a
+        /// silent child" is not a thing a fresh pty gives you: ConPTY writes an initialization
+        /// preamble the moment the console exists, before the child says anything at all, so a read
+        /// taken at spawn completes instantly with bytes and the cancellation never lands. That is
+        /// exactly how the first version of this test failed on Windows while passing on macOS,
+        /// whose ptys start quiet.</para>
         /// </remarks>
         [TestMethod]
         public async Task Cancelling_a_pending_read_consumes_nothing()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
             var options = ShellOptions("CapCancel", useAsyncIo: true);
-            options.App = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh";
-            if (!OperatingSystem.IsWindows())
+
+            // Quiet for a while, speak the marker once, then stay alive so EOF cannot race the test.
+            if (OperatingSystem.IsWindows())
             {
-                // Quiet for long enough to park a read, then speak once.
-                options.CommandLine = new[] { "-c", "sleep 2; printf AFTERCANCEL; sleep 30" };
+                options.App = "cmd.exe";
+                options.CommandLine = new[] { "/c", "ping -n 4 127.0.0.1 >NUL & echo AFTERCANCEL& ping -n 31 127.0.0.1 >NUL" };
+                options.VerbatimCommandLine = false;
+            }
+            else
+            {
+                options.CommandLine = new[] { "-c", "sleep 3; printf AFTERCANCEL; sleep 30" };
             }
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
-
             var buffer = new byte[4096];
 
-            // Park a read while the child is silent, then cancel it.
+            // Drain whatever the pty says on its own -- the ConPTY preamble, a shell banner --
+            // until it has been quiet for half a second. Each drain read is itself a cancellable
+            // read with a short deadline, which is fair: the machinery under test is also the only
+            // machinery that CAN do this without a dedicated thread.
+            while (true)
+            {
+                using var quiet = new CancellationTokenSource(500);
+                try
+                {
+                    var drained = await terminal.ReaderStream.ReadAsync(buffer, 0, buffer.Length, quiet.Token);
+                    drained.Should().BeGreaterThan(0, "EOF here means the child died before the test began");
+                }
+                catch (OperationCanceledException)
+                {
+                    break;   // half a second of silence: NOW the pty is quiet
+                }
+            }
+
+            // Park a read in the silence, then cancel it.
             using var readCts = new CancellationTokenSource();
             var pending = terminal.ReaderStream.ReadAsync(buffer, 0, buffer.Length, readCts.Token);
             await Task.Delay(250, cts.Token);
@@ -95,14 +124,9 @@ namespace Porta.Pty.Tests
             await awaiting.Should().ThrowAsync<OperationCanceledException>(
                 "the read was parked waiting for data, which is exactly where cancellation must land");
 
-            if (OperatingSystem.IsWindows())
-            {
-                return;   // the payload half needs the sh script; the cancellation half ran
-            }
-
             // The stream survived, and the bytes that arrive later are intact.
             var got = string.Empty;
-            var deadline = DateTime.UtcNow.AddSeconds(15);
+            var deadline = DateTime.UtcNow.AddSeconds(20);
             while (DateTime.UtcNow < deadline && !got.Contains("AFTERCANCEL"))
             {
                 var read = await terminal.ReaderStream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
