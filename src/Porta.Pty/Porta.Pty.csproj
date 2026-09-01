@@ -65,9 +65,12 @@
       The PORTABLE rid, not NETCoreSdkRuntimeIdentifier, which is distro-specific on Linux: an SDK on
       Ubuntu 24.04 reports ubuntu.24.04-x64. build.sh only ever writes linux-x64 and linux-arm64, so
       the composed path pointed at a directory that never exists, Exists() went false, and the build
-      SUCCEEDED having staged nothing, the failure surfacing later as a DllNotFoundException for
-      'libporta_pty' from a project-reference consumer, and as a runtimes/ubuntu.24.04-x64/ folder in
-      a package built on such a machine. macOS never showed it because its rid is already portable.
+      SUCCEEDED having staged nothing. What broke was CopyToOutputDirectory: a project-reference
+      consumer got no libporta_pty.so next to its assembly and failed at runtime with
+      DllNotFoundException. Packing still produced a correct nupkg, because the hard-coded None items
+      below are gated on '$(_PortaPtyShimRid)' != 'linux-x64', which a ubuntu.24.04-x64 rid satisfies,
+      so runtimes/linux-x64/native/ was packed by those instead. macOS never showed any of this
+      because its rid is already portable.
 
       NETCoreSdkRuntimeIdentifier is kept as a last resort for an SDK old enough not to define the
       portable one.
@@ -105,6 +108,21 @@
              Link="$(_PortaPtyShimName)"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!--
+    Exists() going false above is silent by construction: the ItemGroup simply contributes nothing
+    and the build succeeds, with the failure deferred to a DllNotFoundException in whatever consumes
+    this. That still happens whenever the rid we compose does not match one build.sh writes - on
+    Alpine, where the portable rid is linux-musl-x64 but build.sh branches only on $OSTYPE and
+    uname -m and writes linux-x64, and under any explicit RuntimeIdentifier, which takes precedence
+    above. Warn instead of failing quietly, and name the path so the mismatch is obvious.
+  -->
+  <Target Name="_PortaPtyWarnMissingShim"
+          BeforeTargets="Build"
+          Condition="'$(_PortaPtyShimName)' != '' And !Exists('$(_PortaPtyShimPath)')">
+    <Warning Code="PORTAPTY001"
+             Text="Porta.Pty: no native shim for runtime identifier '$(_PortaPtyShimRid)' at '$(_PortaPtyShimPath)'. Nothing will be copied to the output directory and consumers will fail at runtime with DllNotFoundException for 'libporta_pty'. Run src/Porta.Pty.Native/build.sh on this machine, or check that the runtime identifier matches a directory it produces." />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.183">

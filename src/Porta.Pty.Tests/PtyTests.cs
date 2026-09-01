@@ -80,6 +80,37 @@ namespace Porta.Pty.Tests
             terminal.WaitForExit(1000);
         }
 
+        /// <summary>
+        /// The Unix providers set ONLCR so the child's line discipline turns each LF it writes into
+        /// CR LF, which is what a terminal emulator needs to get the cursor back to column 0. Nothing
+        /// else in this file pins that: every other assertion is a Contain() on payload text, which
+        /// matches "test" followed by either ending, so a c_oflag accidentally set to NONE stays
+        /// green. Assert on the line ending itself.
+        /// </summary>
+        [TestMethod]
+        public async Task Unix_NewlineIsTranslatedToCarriageReturnNewline()
+        {
+            if (IsWindows)
+            {
+                Assert.Inconclusive("ONLCR is a Unix termios flag; ConPTY has no equivalent to assert on.");
+                return;
+            }
+
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+
+            // The trailing Z is a sentinel: reading until it guarantees every byte before it has
+            // arrived, so the assertion cannot race a partially delivered line ending.
+            var options = CreateShellCommandOptions("OnlcrTest", @"printf 'a\nb\nZ'");
+
+            using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
+
+            string output = await ReadOutputAsync(terminal, "Z", TimeSpan.FromSeconds(5));
+
+            output.Should().Contain("a\r\nb\r\n", "ONLCR must translate the child's LF into CR LF");
+
+            terminal.WaitForExit(1000);
+        }
+
         [TestMethod]
         public async Task SpawnAsync_ReturnsPidGreaterThanZero()
         {
