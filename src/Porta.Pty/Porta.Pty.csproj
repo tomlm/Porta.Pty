@@ -61,6 +61,18 @@
   <PropertyGroup>
     <_PortaPtyNativeRoot>$(MSBuildThisFileDirectory)../Porta.Pty.Native/output/runtimes/</_PortaPtyNativeRoot>
     <_PortaPtyShimRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_PortaPtyShimRid>
+    <!--
+      The PORTABLE rid, not NETCoreSdkRuntimeIdentifier, which is distro-specific on Linux: an SDK on
+      Ubuntu 24.04 reports ubuntu.24.04-x64. build.sh only ever writes linux-x64 and linux-arm64, so
+      the composed path pointed at a directory that never exists, Exists() went false, and the build
+      SUCCEEDED having staged nothing, the failure surfacing later as a DllNotFoundException for
+      'libporta_pty' from a project-reference consumer, and as a runtimes/ubuntu.24.04-x64/ folder in
+      a package built on such a machine. macOS never showed it because its rid is already portable.
+
+      NETCoreSdkRuntimeIdentifier is kept as a last resort for an SDK old enough not to define the
+      portable one.
+    -->
+    <_PortaPtyShimRid Condition="'$(_PortaPtyShimRid)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</_PortaPtyShimRid>
     <_PortaPtyShimRid Condition="'$(_PortaPtyShimRid)' == ''">$(NETCoreSdkRuntimeIdentifier)</_PortaPtyShimRid>
     <_PortaPtyShimName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libporta_pty.dylib</_PortaPtyShimName>
     <_PortaPtyShimName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libporta_pty.so</_PortaPtyShimName>
