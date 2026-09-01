@@ -56,7 +56,7 @@ namespace Porta.Pty.Linux
 
             var term = new PtyTermios(
                 inputFlag: TermInputFlag.ICRNL | TermInputFlag.IXON | TermInputFlag.IXANY | TermInputFlag.IMAXBEL | TermInputFlag.BRKINT | TermInputFlag.IUTF8,
-                outputFlag: TermOutputFlag.NONE,  // Disable all output processing for raw terminal emulation
+                outputFlag: TermOutputFlag.OPOST | TermOutputFlag.ONLCR,
                 controlFlag: TermControlFlag.CREAD | TermControlFlag.CS8 | TermControlFlag.HUPCL,
                 localFlag: TermLocalFlag.ICANON | TermLocalFlag.ISIG | TermLocalFlag.IEXTEN | TermLocalFlag.ECHO | TermLocalFlag.ECHOE | TermLocalFlag.ECHOK | TermLocalFlag.ECHOKE | TermLocalFlag.ECHOCTL,
                 speed: TermSpeed.B38400,
