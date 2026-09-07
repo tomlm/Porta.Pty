@@ -195,7 +195,12 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
     int master_fd = -1;
     sigset_t all_signals, saved_mask;
     sigfillset(&all_signals);
-    pthread_sigmask(SIG_BLOCK, &all_signals, &saved_mask);
+    int mask_err = pthread_sigmask(SIG_BLOCK, &all_signals, &saved_mask);
+    if (mask_err != 0) {
+        /* saved_mask is unspecified on failure; spawning with an unknown mask is worse than not spawning. */
+        result.error = mask_err;
+        return result;
+    }
     pthread_mutex_lock(&pty_spawn_lock);
     pid_t pid = forkpty(&master_fd, NULL, term_ptr, ws_ptr);
     int spawn_errno = errno;

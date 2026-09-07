@@ -46,23 +46,31 @@ namespace Porta.Pty.Tests
             // Enough iterations that some SIGTERMs arrive before the child has exec'd. 300 spawns of
             // /bin/sh run in a few seconds; the window is milliseconds wide on a fast machine and wider
             // on a loaded one, so a handful of hits per run is typical either way.
+            //
+            // The child sleeps far longer than WaitForExit waits, so the only way it exits in time is
+            // the SIGTERM — a regression that dropped the signal cannot pass by the sleep running out.
             for (var i = 0; i < 300; i++)
             {
                 var options = new PtyOptions
                 {
                     Name = "pre-exec-signal",
                     App = "/bin/sh",
-                    CommandLine = new[] { "-c", "sleep 5" },
+                    CommandLine = new[] { "-c", "sleep 600" },
                     Cwd = Environment.CurrentDirectory,
                     Rows = 24,
                     Cols = 80,
                 };
 
                 using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
+
+                // A pid of 0 or below would make kill() signal our own group or every process we may
+                // signal — a self-inflicted version of the very failure this test exists to catch.
+                terminal.Pid.Should().BePositive($"iteration {i}: the spawn must report a real child pid");
                 terminal.Pid.Should().NotBe(ourPid);
 
                 // No delay: this is the Stop-right-after-Start that hits the window.
-                kill(terminal.Pid, SIGTERM);
+                var rc = kill(terminal.Pid, SIGTERM);
+                rc.Should().Be(0, $"iteration {i}: kill(2) failed with errno {Marshal.GetLastPInvokeError()}");
 
                 // The child must die of it — either as a pre-exec copy taking SIGTERM's default action,
                 // or as sh. Never the parent: reaching the next iteration IS the assertion.
