@@ -175,14 +175,34 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
         ws_ptr = &ws;
     }
     
-    /* Fork with PTY */
+    /*
+     * Fork with PTY — with every signal BLOCKED across the fork, and the child resetting every
+     * disposition before it execs. Why this matters, found the hard way (a CI test host dying on a fast box,
+     * 2026-09-07, kernel signal tracepoints):
+     *
+     * The child is a memory copy of the .NET host, INCLUDING the CoreCLR signal handlers. CoreCLR's
+     * SIGTERM/SIGINT/SIGQUIT handlers re-raise the signal with a process id cached at runtime start
+     * (kill(gPID, sig) in coreclr/pal/src/exception/signal.cpp) — which, in a forked child, is the
+     * PARENT's pid. So a caller that kills the child inside the fork->exec window (a Stop issued
+     * right after Start; the window is ~6ms on a fast box) does not kill the child: the child's
+     * inherited handler forwards the SIGTERM to the process that spawned it, and THAT dies.
+     *
+     * exec resets caught signals to SIG_DFL, but only once it happens. Blocking first means a signal
+     * sent in the window stays pending until the child has installed SIG_DFL and restored the mask,
+     * at which point it takes its default action on the child — which is what the sender meant.
+     * This is what .NET's own ForkAndExecProcess does before exec, for the same reason.
+     */
     int master_fd = -1;
+    sigset_t all_signals, saved_mask;
+    sigfillset(&all_signals);
+    pthread_sigmask(SIG_BLOCK, &all_signals, &saved_mask);
     pthread_mutex_lock(&pty_spawn_lock);
     pid_t pid = forkpty(&master_fd, NULL, term_ptr, ws_ptr);
     int spawn_errno = errno;
     if (pid != 0) {
         /* Parent, or forkpty failed. The child must not unlock a mutex it only has a copy of. */
         pthread_mutex_unlock(&pty_spawn_lock);
+        pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
     }
     
     if (pid == -1) {
@@ -197,6 +217,17 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
          * This is the key to avoiding W^X issues.
          */
         
+        /* Drop the parent's signal handlers BEFORE anything can be delivered (see the note above
+         * forkpty). sigaction is async-signal-safe; SIGKILL/SIGSTOP refuse with EINVAL, harmlessly. */
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        for (int sig = 1; sig < NSIG; sig++) {
+            sigaction(sig, &dfl, NULL);
+        }
+        pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
+
         /* Change working directory if specified */
         if (working_dir != NULL && working_dir[0] != '\0') {
             if (chdir(working_dir) == -1) {
