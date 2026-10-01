@@ -5,6 +5,7 @@ namespace Porta.Pty.Unix
 {
     using System;
     using System.IO;
+    using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
     using Microsoft.Win32.SafeHandles;
@@ -142,11 +143,20 @@ namespace Porta.Pty.Unix
         /// A zero timeout, so this answers from the descriptor's current state and never waits. A
         /// descriptor already closed by the connection reports POLLNVAL rather than POLLHUP, so a
         /// read that failed because of a close is still thrown, as it was before.
+        ///
+        /// An interrupted poll is asked again, as <see cref="PtyPoller"/> does. A signal landing
+        /// between the failed read and this probe returns -1 with EINTR, and taking that as "not
+        /// hung up" would let the EIO escape and turn an ordinary exit back into a fault.
         /// </remarks>
         private bool IsHungUp()
         {
             var fds = new[] { new PollFd { Fd = this.fd, Events = POLLIN } };
-            return poll(fds, (UIntPtr)1, 0) == 1 && (fds[0].Revents & POLLHUP) != 0;
+            int ready;
+            while ((ready = poll(fds, (UIntPtr)1, 0)) < 0 && Marshal.GetLastPInvokeError() == EINTR)
+            {
+            }
+
+            return ready == 1 && (fds[0].Revents & POLLHUP) != 0;
         }
     }
 }
