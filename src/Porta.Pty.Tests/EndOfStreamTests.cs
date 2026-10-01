@@ -131,6 +131,101 @@ namespace Porta.Pty.Tests
         }
 
         [TestMethod]
+        [DataRow(false, DisplayName = "blocking")]
+        [DataRow(true, DisplayName = "non-blocking")]
+        public async Task AChildThatExitsEndsTheStreamOnASpanRead(bool useAsyncIo)
+        {
+            // Each read entry point is tested on its own, as each is guarded on its own. Which of
+            // them FileStream routes through the others is its internal detail -- today a Span read
+            // ends in the array read, a ReadByte does not -- so a pass on one says nothing certain
+            // about another.
+            if (IsWindows)
+            {
+                Assert.Inconclusive("EIO on a pty controller is a Unix concern.");
+            }
+
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            using IPtyConnection terminal = await PtyProvider.SpawnAsync(
+                Command("SpanEof", "echo EOF_MARKER", useAsyncIo), cts.Token);
+
+            // On a pool thread so a read that never returns fails the test instead of hanging it.
+            var drain = Task.Run(() =>
+            {
+                var output = new StringBuilder();
+                var buffer = new byte[4096];
+                int read;
+                while ((read = terminal.ReaderStream.Read(buffer.AsSpan())) > 0)
+                {
+                    output.Append(Encoding.UTF8.GetString(buffer, 0, read));
+                }
+
+                return output.ToString();
+            });
+
+            var finished = await Task.WhenAny(drain, Task.Delay(TestTimeoutMs));
+            finished.Should().BeSameAs(drain, "the read should end when the child exits");
+            (await drain).Should().Contain("EOF_MARKER");
+        }
+
+        [TestMethod]
+        [DataRow(false, DisplayName = "blocking")]
+        [DataRow(true, DisplayName = "non-blocking")]
+        public async Task AChildThatExitsEndsTheStreamOnReadByte(bool useAsyncIo)
+        {
+            // ReadByte reports the end as -1, not 0.
+            if (IsWindows)
+            {
+                Assert.Inconclusive("EIO on a pty controller is a Unix concern.");
+            }
+
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            using IPtyConnection terminal = await PtyProvider.SpawnAsync(
+                Command("ByteEof", "echo EOF_MARKER", useAsyncIo), cts.Token);
+
+            // On a pool thread so a read that never returns fails the test instead of hanging it.
+            var drain = Task.Run(() =>
+            {
+                var output = new List<byte>();
+                int value;
+                while ((value = terminal.ReaderStream.ReadByte()) != -1)
+                {
+                    output.Add((byte)value);
+                }
+
+                return Encoding.UTF8.GetString(output.ToArray());
+            });
+
+            var finished = await Task.WhenAny(drain, Task.Delay(TestTimeoutMs));
+            finished.Should().BeSameAs(drain, "the read should end when the child exits");
+            (await drain).Should().Contain("EOF_MARKER");
+        }
+
+        [TestMethod]
+        [DataRow(false, DisplayName = "blocking")]
+        [DataRow(true, DisplayName = "non-blocking")]
+        public async Task AChildThatExitsEndsTheStreamOnAnArrayAsyncRead(bool useAsyncIo)
+        {
+            if (IsWindows)
+            {
+                Assert.Inconclusive("EIO on a pty controller is a Unix concern.");
+            }
+
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            using IPtyConnection terminal = await PtyProvider.SpawnAsync(
+                Command("ArrayAsyncEof", "echo EOF_MARKER", useAsyncIo), cts.Token);
+
+            var output = new StringBuilder();
+            var buffer = new byte[4096];
+            int read;
+            while ((read = await terminal.ReaderStream.ReadAsync(buffer, 0, buffer.Length, cts.Token)) > 0)
+            {
+                output.Append(Encoding.UTF8.GetString(buffer, 0, read));
+            }
+
+            output.ToString().Should().Contain("EOF_MARKER");
+        }
+
+        [TestMethod]
         public async Task ReadingAfterTheEndKeepsReturningZero()
         {
             // A caller that reads once more after seeing the end -- a retry, a second consumer --
