@@ -11,6 +11,11 @@
  * Licensed under the MIT license.
  */
 
+/* glibc declares pipe2, used for the exec report pipe, only under _GNU_SOURCE. */
+#if !defined(__APPLE__) && !defined(_GNU_SOURCE)
+    #define _GNU_SOURCE
+#endif
+
 #if defined(__APPLE__)
     #include <util.h>
     #include <sys/ioctl.h>
@@ -110,6 +115,68 @@ typedef struct {
  *   pty_spawn_result_t with master_fd and pid on success, or pid=-1 and error set on failure
  */
 /*
+ * Reports a failed chdir or exec of the child to the parent, then ends the child. Only write(2) and
+ * _exit(2), both async-signal-safe.
+ */
+static void pty_child_failed(int report_fd, int err)
+{
+    ssize_t written;
+    do {
+        written = write(report_fd, &err, sizeof(err));
+    } while (written == -1 && errno == EINTR);
+    _exit(err);
+}
+
+/*
+ * Creates the exec report pipe with both ends close-on-exec at creation. pipe2 exists on Linux and,
+ * on macOS, from macOS 27; a shim built for an older macOS sets the flag right after pipe(2), and a
+ * process that another thread forks in that instant keeps the write end and delays this spawn until
+ * it exits.
+ */
+static int pty_report_pipe(int fds[2])
+{
+#if defined(__APPLE__) && __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 270000
+    if (pipe(fds) != 0) {
+        return -1;
+    }
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#else
+    return pipe2(fds, O_CLOEXEC);
+#endif
+}
+
+/*
+ * Waits for the child to exec or to report why it could not. Returns 0 once exec has closed the
+ * close-on-exec write end (end of file, nothing read), or the child's errno. In that case the child
+ * is collected here, since nobody else will ever learn its pid.
+ */
+static int pty_wait_for_exec(int report_fd, pid_t pid)
+{
+    int child_errno = 0;
+    size_t got = 0;
+    while (got < sizeof(child_errno)) {
+        ssize_t n = read(report_fd, (char*)&child_errno + got, sizeof(child_errno) - got);
+        if (n == -1 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            break;
+        }
+        got += (size_t)n;
+    }
+    if (got < sizeof(child_errno)) {
+        return 0;
+    }
+
+    int status;
+    while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {
+    }
+    return child_errno > 0 ? child_errno : EIO;
+}
+
+/*
  * Serialises pty allocation.
  *
  * Darwin's forkpty() -> openpty() -> grantpt()/unlockpt() path is NOT thread safe. Called
@@ -143,13 +210,14 @@ static pthread_mutex_t pty_spawn_lock = PTHREAD_MUTEX_INITIALIZER;
  * forkpty does not mark the controller close-on-exec, and descriptors the host made without
  * O_CLOEXEC (the poller's wakeup pipe, other terminals' controllers) were inherited by every child:
  * terminal B could write into terminal A's controller. Only async-signal-safe calls are used here,
- * since this runs between fork and exec of a multithreaded host.
+ * since this runs between fork and exec of a multithreaded host. keep stays open: it is the write end
+ * of the pipe that reports a failed chdir or exec to the parent, and it is close-on-exec already.
  *
  * macOS marks instead of closing, as Crashpad does: close() of a descriptor with a close guard
  * (guarded_open_np, change_fdguard_np) raises EXC_GUARD and kills the child, while setting
  * close-on-exec is allowed, and exec then closes the descriptors itself.
  */
-static void pty_close_inherited_fds(void)
+static void pty_close_inherited_fds(int keep)
 {
 #if defined(__APPLE__)
     struct proc_fdinfo fds[512];
@@ -157,7 +225,7 @@ static void pty_close_inherited_fds(void)
     if (bytes > 0) {
         int n = bytes / (int)sizeof(fds[0]);
         for (int i = 0; i < n; i++) {
-            if (fds[i].proc_fd > 2) {
+            if (fds[i].proc_fd > 2 && fds[i].proc_fd != keep) {
                 fcntl(fds[i].proc_fd, F_SETFD, FD_CLOEXEC);
             }
         }
@@ -169,7 +237,8 @@ static void pty_close_inherited_fds(void)
     }
 #else
 #if defined(SYS_close_range)
-    if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) {
+    if ((keep <= 3 || syscall(SYS_close_range, 3U, (unsigned int)keep - 1, 0U) == 0)
+        && syscall(SYS_close_range, (unsigned int)(keep < 3 ? 3 : keep + 1), ~0U, 0U) == 0) {
         return;
     }
 #endif
@@ -193,7 +262,7 @@ static void pty_close_inherited_fds(void)
                     for (const char* c = name; *c >= '0' && *c <= '9'; c++) {
                         fd = fd * 10 + (*c - '0');
                     }
-                    if (fd > 2 && fd != dir) {
+                    if (fd > 2 && fd != dir && fd != keep) {
                         close(fd);
                         restart = 1;
                     }
@@ -208,11 +277,13 @@ static void pty_close_inherited_fds(void)
     struct rlimit rl;
     long max = (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) ? (long)rl.rlim_cur : 65536;
     for (long fd = 3; fd < max; fd++) {
+        if (fd != keep) {
 #if defined(__APPLE__)
-        fcntl((int)fd, F_SETFD, FD_CLOEXEC);
+            fcntl((int)fd, F_SETFD, FD_CLOEXEC);
 #else
-        close((int)fd);
+            close((int)fd);
 #endif
+        }
     }
 }
 
@@ -287,6 +358,44 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
         return result;
     }
     pthread_mutex_lock(&pty_spawn_lock);
+
+    /*
+     * The pipe that tells a failed chdir or exec from a program that ran and exited. Both ends are
+     * close-on-exec from the moment they exist, so a successful exec closes the write end and the
+     * parent reads end of file; a failure writes the child's errno first. Without it, a missing
+     * program or working folder looked like a program that ran and exited with 2 (ENOENT, passed
+     * to _exit). Any other process that inherited the write end would hold it open across its own
+     * exec and keep the parent's read waiting until that process EXITS, so the flag is set by
+     * pipe2 itself, never after.
+     *
+     * Both ends then move above the two numbers pipe2 took, which go back to forkpty, so the
+     * controller still gets the lowest free number, as it did before this pipe existed;
+     * F_DUPFD_CLOEXEC keeps the flag on the copies.
+     */
+    int report[2];
+    int pipe_err = pty_report_pipe(report) == 0 ? 0 : errno;
+    if (pipe_err == 0) {
+        int floor = (report[0] > report[1] ? report[0] : report[1]) + 1;
+        for (int end = 0; end < 2; end++) {
+            int moved = fcntl(report[end], F_DUPFD_CLOEXEC, floor);
+            if (moved == -1 && pipe_err == 0) {
+                pipe_err = errno;
+            }
+            close(report[end]);
+            report[end] = moved;
+        }
+        if (pipe_err != 0) {
+            if (report[0] != -1) close(report[0]);
+            if (report[1] != -1) close(report[1]);
+        }
+    }
+    if (pipe_err != 0) {
+        result.error = pipe_err;
+        pthread_mutex_unlock(&pty_spawn_lock);
+        pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
+        return result;
+    }
+
     pid_t pid = forkpty(&master_fd, NULL, term_ptr, ws_ptr);
     int spawn_errno = errno;
     if (pid > 0) {
@@ -297,10 +406,12 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
         /* Parent, or forkpty failed. The child must not unlock a mutex it only has a copy of. */
         pthread_mutex_unlock(&pty_spawn_lock);
         pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
+        close(report[1]);
     }
     
     if (pid == -1) {
         /* forkpty failed */
+        close(report[0]);
         result.error = spawn_errno;
         return result;
     }
@@ -322,12 +433,13 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
         }
         pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
 
-        pty_close_inherited_fds();
+        close(report[0]);
+        pty_close_inherited_fds(report[1]);
 
         /* Change working directory if specified */
         if (working_dir != NULL && working_dir[0] != '\0') {
             if (chdir(working_dir) == -1) {
-                _exit(errno);
+                pty_child_failed(report[1], errno);
             }
         }
         
@@ -363,10 +475,18 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
         execvp(file, argv);
         
         /* If we get here, execvp failed */
-        _exit(errno);
+        pty_child_failed(report[1], errno);
     }
     
-    /* Parent process */
+    /* Parent process: the spawn has succeeded only once the program has replaced the child. */
+    int exec_errno = pty_wait_for_exec(report[0], pid);
+    close(report[0]);
+    if (exec_errno != 0) {
+        close(master_fd);
+        result.error = exec_errno;
+        return result;
+    }
+
     result.master_fd = master_fd;
     result.pid = pid;
     result.error = 0;

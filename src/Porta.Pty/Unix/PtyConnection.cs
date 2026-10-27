@@ -33,6 +33,11 @@ namespace Porta.Pty.Unix
         /// <see cref="reaped"/> still false can only reach the child.
         /// </summary>
         private readonly object signalGate = new object();
+
+        /// <summary>Guards <see cref="processExited"/> and <see cref="exitedArgs"/> together.</summary>
+        private readonly object exitGate = new object();
+        private EventHandler<PtyExitedEventArgs>? processExited;
+        private PtyExitedEventArgs? exitedArgs;
         private bool reaped;
         private int exitCode;
         private int exitSignal;
@@ -122,7 +127,42 @@ namespace Porta.Pty.Unix
         }
 
         /// <inheritdoc/>
-        public event EventHandler<PtyExitedEventArgs>? ProcessExited;
+        /// <remarks>
+        /// A handler added after the program has exited is called at once, on the caller's thread, with
+        /// the same arguments, so an exception it throws reaches the caller that adds it. The exit can be
+        /// reported before the caller that spawned the program has had a chance to subscribe, and
+        /// <see cref="IPtyConnection"/> carries only the exit code, 0 for a program killed by a signal,
+        /// so a late subscriber would otherwise lose <see cref="PtyExitedEventArgs.ExitSignal"/>
+        /// (LateSubscriberTests).
+        /// </remarks>
+        public event EventHandler<PtyExitedEventArgs>? ProcessExited
+        {
+            add
+            {
+                PtyExitedEventArgs? already;
+                lock (this.exitGate)
+                {
+                    already = this.exitedArgs;
+                    if (already is null)
+                    {
+                        this.processExited += value;
+                    }
+                }
+
+                if (already is not null)
+                {
+                    value?.Invoke(this, already);
+                }
+            }
+
+            remove
+            {
+                lock (this.exitGate)
+                {
+                    this.processExited -= value;
+                }
+            }
+        }
 
         /// <inheritdoc/>
         public Stream ReaderStream { get; }
@@ -206,11 +246,31 @@ namespace Porta.Pty.Unix
         }
 
         /// <inheritdoc/>
+        /// <remarks>
+        /// Goes through the counted path of the descriptor, like reads and writes: once the connection
+        /// is disposed, the number it kept may already belong to the next terminal, and an ioctl on it
+        /// would resize that one instead.
+        /// </remarks>
+        /// <exception cref="ObjectDisposedException">The pseudoterminal is already closed.</exception>
         public void Resize(int cols, int rows)
         {
-            if (!this.Resize(this.controller, cols, rows))
+            if (!this.descriptor.TryAcquire())
             {
-                throw new InvalidOperationException($"Resizing terminal failed with error {Marshal.GetLastWin32Error()}");
+                throw new ObjectDisposedException(
+                    nameof(PtyConnection),
+                    $"The pseudoterminal of process {this.pid} is closed, so it cannot be resized.");
+            }
+
+            try
+            {
+                if (!this.Resize(this.descriptor.Raw, cols, rows))
+                {
+                    throw new InvalidOperationException($"Resizing terminal failed with error {Marshal.GetLastWin32Error()}");
+                }
+            }
+            finally
+            {
+                this.descriptor.Release();
             }
         }
 
@@ -441,8 +501,17 @@ namespace Porta.Pty.Unix
 
             this.exitSignal = status & SignalMask;
             this.exitCode = this.exitSignal == 0 ? (status >> 8) & ExitCodeMask : 0;
+            var args = new PtyExitedEventArgs(this.exitCode, this.exitSignal);
+            EventHandler<PtyExitedEventArgs>? handlers;
+            lock (this.exitGate)
+            {
+                this.exitedArgs = args;
+                handlers = this.processExited;
+                this.processExited = null;
+            }
+
             this.terminalProcessTerminatedEvent.Set();
-            this.ProcessExited?.Invoke(this, new PtyExitedEventArgs(this.exitCode));
+            handlers?.Invoke(this, args);
         }
     }
 }

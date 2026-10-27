@@ -22,8 +22,10 @@ namespace Porta.Pty.Unix
     /// making the close wait for them closes it: after Close returns, no syscall against this
     /// descriptor is running or can start.
     ///
-    /// The wait is bounded and short by construction. This type is only used on the non-blocking
-    /// path, where read(2) and write(2) return immediately rather than parking in the kernel.
+    /// The wait is bounded and short by construction. Reads and writes take a reference only on the
+    /// non-blocking path, where read(2) and write(2) return immediately rather than parking in the
+    /// kernel; on the blocking path PtyStream reads and writes the raw number. Resize takes one on
+    /// both paths, for an ioctl that returns at once.
     /// </remarks>
     internal sealed class PtyDescriptor
     {
@@ -34,11 +36,13 @@ namespace Porta.Pty.Unix
         internal PtyDescriptor(int fd) => this.fd = fd;
 
         /// <summary>
-        /// The raw descriptor, for callers that are not on the transfer path.
+        /// The raw descriptor number.
         /// </summary>
         /// <remarks>
-        /// Kill and Resize use this. Neither is a hot path, and Kill runs before the close in
-        /// Dispose, so neither takes the reference-counted route.
+        /// Resize takes a reference with <see cref="TryAcquire"/> while it uses it, on both paths, and
+        /// so do reads and writes on the non-blocking path; the blocking PtyStream uses the raw number.
+        /// After the close the number may already belong to another terminal, and an ioctl on it
+        /// resized that one.
         /// </remarks>
         internal int Raw => this.fd;
 
