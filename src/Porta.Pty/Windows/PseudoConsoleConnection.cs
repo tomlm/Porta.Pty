@@ -142,9 +142,32 @@ namespace Porta.Pty.Windows
         }
 
         /// <inheritdoc/>
+        public bool HasExited => this.process.HasExited;
+
+        /// <inheritdoc/>
         public void Kill()
         {
             this.process.Kill();
+        }
+
+        /// <inheritdoc/>
+        public System.Threading.Tasks.Task KillAsync(bool entireProcessTree = true, TimeSpan? grace = null)
+        {
+            if (grace < TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(grace), grace, "The grace period cannot be negative.");
+            }
+
+            // No SIGHUP to wait out, so grace has nothing to do here. The job object holds the process and
+            // everything it starts (nothing breaks away), so terminating it is the whole tree, the
+            // descendants of a descendant that has already exited included.
+            SafeFileHandle? job = this.handles?.JobObjectHandle;
+            if (!entireProcessTree || job == null || !JobObject.Terminate(job))
+            {
+                this.process.Kill(entireProcessTree);
+            }
+
+            return System.Threading.Tasks.Task.CompletedTask;
         }
 
         /// <inheritdoc/>

@@ -212,9 +212,11 @@ namespace Porta.Pty.Tests
 
             try
             {
+                StopAndWait(pid);
+
+                // Counted from the confirmed stop: a stop lost and sent again (see StopAndWait) leaves an
+                // extra stop report for the library to take, which is not the polling this measures.
                 var beforeStop = probe.Waits.NoHangWaits;
-                kill(pid, SIGSTOP).Should().Be(0, $"SIGSTOP to child {pid} failed with errno {Marshal.GetLastPInvokeError()}");
-                WaitUntil(() => IsStopped(pid), $"child {pid} did not stop after SIGSTOP");
                 Thread.Sleep(500);
                 var whileStopped = probe.Waits.NoHangWaits - beforeStop;
 
@@ -266,6 +268,46 @@ namespace Porta.Pty.Tests
         }
 
         /// <summary>
+        /// The stop helper the test above depends on: a SIGSTOP that never takes effect is sent again until
+        /// the child is seen stopped. The first SIGSTOP is swallowed, as a lost one is, so the child is never
+        /// stopped by it; only a re-send that really reaches kill(2) can stop it.
+        /// </summary>
+        [TestMethod]
+        public void Unix_StopAndWait_SendsSigStopAgainWhenTheFirstIsLost()
+        {
+            if (IsWindows)
+            {
+                Assert.Inconclusive("SIGSTOP is a Unix concern");
+            }
+
+            var pid = SpawnChild("exec /bin/sleep 600");
+            try
+            {
+                int attempts = 0;
+                int delivered = 0;
+                StopAndWait(pid, (p, signal) =>
+                {
+                    if (++attempts == 1)
+                    {
+                        return 0; // lost: reported sent, never delivered
+                    }
+
+                    delivered++;
+                    return kill(p, signal);
+                });
+
+                delivered.Should().BePositive("the lost first SIGSTOP has to be made good by a re-send that reaches kill(2)");
+                IsStopped(pid).Should().BeTrue("the helper returns only once the child is stopped");
+            }
+            finally
+            {
+                kill(pid, SIGKILL);
+                var status = 0;
+                waitpid(pid, ref status, 0);
+            }
+        }
+
+        /// <summary>
         /// macOS: Kill of a child that dies of SIGHUP returns once the child is collected, not after the
         /// fixed 100 ms grace period. The fastest of five is compared with half the grace period.
         /// </summary>
@@ -310,6 +352,57 @@ namespace Porta.Pty.Tests
                 "Kill should return as soon as the child has died of SIGHUP (useAsyncIo={0}); took [{1}] ms",
                 useAsyncIo,
                 string.Join(", ", durations.Select(d => d.ToString("F1"))));
+        }
+
+        /// <summary>
+        /// macOS: a child that dies of SIGHUP is not sent SIGKILL even when its exit is reported late. Kill's
+        /// 100 ms grace used to take "not reported yet" for "still running" and send SIGKILL to the exited
+        /// child; a lost kqueue event, reported by the reaper's sweep up to a second on, did exactly that.
+        /// Here the report is held back until the grace decision has been made: the reaper's seams drop this
+        /// child's event and keep the sweep off it until Kill's grace step has finished, so at that decision
+        /// the exit is never reported, and only asking the kernel whether the child has exited can spare it.
+        /// </summary>
+        [TestMethod]
+        public void Mac_KillOfAChildThatDiesOfSigHup_SendsNoSigKillWhenItsExitIsReportedLate()
+        {
+            if (!IsMac)
+            {
+                Assert.Inconclusive("only macOS follows SIGHUP with SIGKILL");
+            }
+
+            var pid = SpawnChild("exec /bin/sleep 600");
+            WaitUntilRunning(pid, "/bin/sleep");
+            var reaper = Unix.PtyReaper.Instance;
+            reaper.LoseExitEvent = p => p == pid;
+            reaper.HoldSweep = p => p == pid;
+            using var probe = Probe.Create(OpenDevNull(), pid, useAsyncIo: true, forward: true);
+            try
+            {
+                probe.Connection.Kill();
+
+                // The grace decision is made with the exit still unreported: no event, no sweep.
+                var grace = probe.Connection.PendingGraceKill;
+                grace.Should().NotBeNull("Kill on macOS starts a grace step");
+                grace!.Wait(TestTimeoutMs).Should().BeTrue("Kill's grace step should finish");
+                probe.Connection.WaitForExit(0).Should().BeFalse("the exit must not have been reported before the grace decision");
+
+                reaper.HoldSweep = null;
+                probe.Connection.WaitForExit(TestTimeoutMs).Should().BeTrue("the reaper's sweep reports the exit its lost event did not");
+                probe.Sent.Select(s => s.Signal).Should().Equal(
+                    new[] { SIGHUP },
+                    "the child died of SIGHUP, so the grace period must not send it SIGKILL however late the exit is reported");
+                probe.Connection.ExitSignal.Should().Be(SIGHUP);
+            }
+            finally
+            {
+                reaper.LoseExitEvent = null;
+                reaper.HoldSweep = null;
+                if (!probe.Connection.WaitForExit(0))
+                {
+                    // Not collected, so the pid is still the child's own.
+                    kill(pid, SIGKILL);
+                }
+            }
         }
 
         /// <summary>
@@ -534,6 +627,39 @@ namespace Porta.Pty.Tests
             }
 
             Assert.Fail($"child {pid} did not exec {path} within {TestTimeoutMs} ms");
+        }
+
+        /// <summary>
+        /// Sends SIGSTOP and waits until the child is seen stopped, sending it again on each look that finds
+        /// the child still running.
+        /// </summary>
+        /// <remarks>
+        /// macOS sometimes loses a SIGSTOP sent to a running process: the process carries on, unstopped,
+        /// and nothing stops it again. Measured in a standalone C harness, the same posix_spawn'd shell loop
+        /// lost about 1 SIGSTOP in 200 to 400 while its parent was waiting on it (waitpid with WUNTRACED, as
+        /// the library's blocking watcher does), and the process went on using CPU as if never signalled;
+        /// none were lost without the waiter. That is what failed this test on a CI runner ("did not stop
+        /// after SIGSTOP"). A SIGSTOP to a process that is already stopped does nothing, so sending it again
+        /// is safe and converges.
+        /// </remarks>
+        /// <param name="pid">The child.</param>
+        /// <param name="send">How a SIGSTOP is sent; the default is kill(2). A seam for the test of this helper.</param>
+        private static void StopAndWait(int pid, Func<int, int, int>? send = null)
+        {
+            send ??= kill;
+            send(pid, SIGSTOP).Should().Be(0, $"SIGSTOP to child {pid} failed with errno {Marshal.GetLastPInvokeError()}");
+            WaitUntil(
+                () =>
+                {
+                    if (IsStopped(pid))
+                    {
+                        return true;
+                    }
+
+                    send(pid, SIGSTOP);
+                    return false;
+                },
+                $"child {pid} did not stop after SIGSTOP");
         }
 
         private static void WaitUntil(Func<bool> condition, string failure)

@@ -264,6 +264,25 @@ namespace Porta.Pty.Mac
             ref PtyWinSize winsize);
 
         /// <summary>
+        /// The child's environment is exactly envp rather than the parent's with envp applied on top.
+        /// </summary>
+        internal const int PTY_SPAWN_CLEAR_ENV = 0x1;
+
+        /// <summary>
+        /// <see cref="pty_spawn"/> with flags; used only when a flag is set, so an older shim keeps
+        /// working for every spawn that does not ask for one.
+        /// </summary>
+        [DllImport(LibPortaPty, SetLastError = true)]
+        internal static extern PtySpawnResult pty_spawn_ex(
+            [MarshalAs(UnmanagedType.LPStr)] string file,
+            [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string?[] argv,
+            [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string?[]? envp,
+            [MarshalAs(UnmanagedType.LPStr)] string? workingDir,
+            ref PtyTermios termios,
+            ref PtyWinSize winsize,
+            int flags);
+
+        /// <summary>
         /// Resizes the PTY window.
         /// </summary>
         [DllImport(LibPortaPty, SetLastError = true)]

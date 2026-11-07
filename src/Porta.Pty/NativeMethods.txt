@@ -1,6 +1,7 @@
 CreateJobObject
 SetInformationJobObject
 AssignProcessToJobObject
+TerminateJobObject
 InitializeProcThreadAttributeList
 UpdateProcThreadAttribute
 DeleteProcThreadAttributeList

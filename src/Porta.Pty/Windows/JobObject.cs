@@ -107,5 +107,33 @@ namespace Porta.Pty.Windows
                     new Win32Exception());
             }
         }
+
+        /// <summary>
+        /// Terminates every process in the job object.
+        /// </summary>
+        /// <param name="jobHandle">The job object handle.</param>
+        /// <returns>True if the job was terminated, false if the handle is gone or the call failed.</returns>
+        public static bool Terminate(SafeFileHandle jobHandle)
+        {
+            // Held for the call: a Dispose on another thread could otherwise close the handle between
+            // reading it and using it, and a recycled value would terminate some other terminal's job.
+            bool added = false;
+            try
+            {
+                jobHandle.DangerousAddRef(ref added);
+                return !jobHandle.IsInvalid && PInvoke.TerminateJobObject((HANDLE)jobHandle.DangerousGetHandle(), 1);
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            finally
+            {
+                if (added)
+                {
+                    jobHandle.DangerousRelease();
+                }
+            }
+        }
     }
 }

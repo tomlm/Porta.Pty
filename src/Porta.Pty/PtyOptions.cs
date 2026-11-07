@@ -54,6 +54,18 @@ namespace Porta.Pty
         public IDictionary<string, string> Environment { get; set; } = new Dictionary<string, string>();
 
         /// <summary>
+        /// Gets or sets a value indicating whether the process starts from this process's environment,
+        /// with <see cref="Environment"/> applied on top. On by default.
+        /// </summary>
+        /// <remarks>
+        /// When false, the process gets exactly <see cref="Environment"/> and nothing else: no parent
+        /// variables, and none of the defaults this library otherwise adds (such as <c>TERM</c>), so set
+        /// whatever the program needs, <c>PATH</c> and <c>TERM</c> included. An empty value then sets the
+        /// variable to the empty string. When true, as before, an empty value removes the variable.
+        /// </remarks>
+        public bool InheritEnvironment { get; set; } = true;
+
+        /// <summary>
         /// Gets or sets a value indicating whether reads and writes should complete without holding
         /// a thread. Off by default.
         /// </summary>
