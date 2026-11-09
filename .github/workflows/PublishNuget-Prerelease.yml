@@ -141,6 +141,9 @@ jobs:
       - build-native-linux-x64
       - build-native-linux-arm64
       - build-native-macos
+    permissions:
+      id-token: write  # trusted publishing: OIDC token exchanged for a NuGet API key
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -276,11 +279,17 @@ jobs:
       # compute the same number. Swallowing that would report a successful publish of a package that
       # was never uploaded, and the whole point here is to test what actually got published. Failing
       # loudly costs a re-run, by which time the index has caught up.
+      - name: NuGet login (trusted publishing)
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: thermous
+
       - name: Publish NuGet and symbols
         id: nuget-push
         uses: edumserrano/nuget-push@v1
         with:
-          api-key: '${{ secrets.NUGET_KEY }}'
+          api-key: '${{ steps.nuget-login.outputs.NUGET_API_KEY }}'
           working-directory: 'packages'
           fail-if-exists: true
 
