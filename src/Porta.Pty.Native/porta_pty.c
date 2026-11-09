@@ -13,12 +13,17 @@
 
 #if defined(__APPLE__)
     #include <util.h>
+    #include <crt_externs.h>
     #include <sys/ioctl.h>
+    #include <sys/proc.h>
+    #include <sys/sysctl.h>
     #include <sys/event.h>
     #include <sys/time.h>
     #include <libproc.h>
 #else
     #include <pty.h>
+    #include <dirent.h>
+    #include <stdio.h>
     #include <sys/epoll.h>
     #include <sys/syscall.h>
 
@@ -216,6 +221,29 @@ static void pty_close_inherited_fds(void)
     }
 }
 
+/*
+ * pty_spawn_ex flags.
+ *
+ * PTY_SPAWN_CLEAR_ENV: the child's environment is EXACTLY envp (NULL meaning none at all) instead of
+ * the parent's with envp applied on top. Without it a variable cannot be withheld: the forked child
+ * starts from a copy of the parent's environ, so leaving a key out of envp still inherits it. Values
+ * are taken as given, so "KEY=" sets KEY to the empty string, and TERM is not defaulted.
+ */
+#define PTY_SPAWN_CLEAR_ENV 0x1
+
+#if !defined(__APPLE__)
+extern char** environ;
+#endif
+
+PTY_EXPORT pty_spawn_result_t pty_spawn_ex(
+    const char* file,
+    char* const argv[],
+    char* const envp[],
+    const char* working_dir,
+    const pty_termios_t* termios_settings,
+    const pty_winsize_t* winsize_settings,
+    int flags);
+
 PTY_EXPORT pty_spawn_result_t pty_spawn(
     const char* file,
     char* const argv[],
@@ -223,6 +251,18 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
     const char* working_dir,
     const pty_termios_t* termios_settings,
     const pty_winsize_t* winsize_settings)
+{
+    return pty_spawn_ex(file, argv, envp, working_dir, termios_settings, winsize_settings, 0);
+}
+
+PTY_EXPORT pty_spawn_result_t pty_spawn_ex(
+    const char* file,
+    char* const argv[],
+    char* const envp[],
+    const char* working_dir,
+    const pty_termios_t* termios_settings,
+    const pty_winsize_t* winsize_settings,
+    int flags)
 {
     pty_spawn_result_t result = { -1, -1, 0 };
     
@@ -331,6 +371,21 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
             }
         }
         
+        if (flags & PTY_SPAWN_CLEAR_ENV) {
+            /* Point environ at envp itself: no allocation between fork and exec, and execvp then both
+             * searches the caller's PATH and passes exactly these strings on. The array lives in the
+             * parent's memory, which the child has a copy of. */
+            static char* const empty_env[] = { NULL };
+            char** env = (char**)(envp != NULL ? envp : empty_env);
+#if defined(__APPLE__)
+            *_NSGetEnviron() = env;
+#else
+            environ = env;
+#endif
+            execvp(file, argv);
+            _exit(errno);
+        }
+
         /* Set TERM environment variable if not already set */
         if (getenv("TERM") == NULL) {
             setenv("TERM", "xterm-256color", 0);
@@ -620,6 +675,140 @@ PTY_EXPORT int pty_wait_exit_noreap(int pid)
         r = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT);
     } while (r == -1 && errno == EINTR);
     return r;
+}
+
+/*
+ * Whether pid has exited, WITHOUT waiting and without collecting it: 1 if it has, 0 if not, -1 on
+ * failure. A stop or continue report is "not exited": Darwin's waitid reports a stopped child even
+ * when only WEXITED is asked for, so the code is checked rather than trusting the call.
+ */
+PTY_EXPORT int pty_exited_noreap(int pid)
+{
+    siginfo_t info;
+    int r;
+    do {
+        memset(&info, 0, sizeof(info));
+        r = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    } while (r == -1 && errno == EINTR);
+    if (r == -1) {
+        return -1;
+    }
+    if (info.si_pid != pid) {
+        return 0;
+    }
+    return (info.si_code == CLD_EXITED || info.si_code == CLD_KILLED || info.si_code == CLD_DUMPED) ? 1 : 0;
+}
+
+/*
+ * Whether process group pgid has a living member other than exclude_pid: 1 if it has, 0 if not, -1
+ * when membership cannot be determined. Zombies do not count. Used by a tree kill that holds the
+ * group's leader as a zombie: that zombie keeps kill(-pgid, 0) succeeding, so it cannot tell when
+ * everything else has gone.
+ */
+PTY_EXPORT int pty_group_has_live_members(int pgid, int exclude_pid)
+{
+#if defined(__APPLE__)
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PGRP, pgid };
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) == -1) {
+        return -1;
+    }
+    /* Room for a few processes started between the two calls. */
+    len += 16 * sizeof(struct kinfo_proc);
+    struct kinfo_proc* procs = (struct kinfo_proc*)malloc(len);
+    if (procs == NULL) {
+        return -1;
+    }
+    /* A list that did not fit fails with ENOMEM rather than arriving cut short; a length that is not
+     * whole records is not trusted either. Either way the answer is unknown, never empty. */
+    if (sysctl(mib, 4, procs, &len, NULL, 0) == -1 || len % sizeof(struct kinfo_proc) != 0) {
+        free(procs);
+        return -1;
+    }
+    int n = (int)(len / sizeof(struct kinfo_proc));
+    int live = 0;
+    for (int i = 0; i < n; i++) {
+        if (procs[i].kp_proc.p_pid != exclude_pid && procs[i].kp_proc.p_stat != SZOMB) {
+            live = 1;
+            break;
+        }
+    }
+    free(procs);
+    return live;
+#else
+    DIR* proc = opendir("/proc");
+    if (proc == NULL) {
+        return -1;
+    }
+    /*
+     * Empty is only reported once every candidate has been read or confirmed gone. A candidate that
+     * could not be read (EMFILE, EACCES, EIO, an unparseable line) or an enumeration that failed makes
+     * the answer unknown, which the caller takes as "wait the whole grace period". Reading it as absent
+     * would SIGKILL a live descendant still handling its SIGHUP.
+     */
+    int live = 0;
+    int unknown = 0;
+    struct dirent* entry;
+    for (;;) {
+        errno = 0;
+        entry = readdir(proc);
+        if (entry == NULL) {
+            if (errno != 0) {
+                unknown = 1;
+            }
+            break;
+        }
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+            continue;
+        }
+        char dir[64];
+        char path[80];
+        snprintf(dir, sizeof(dir), "/proc/%s", entry->d_name);
+        snprintf(path, sizeof(path), "%s/stat", dir);
+        int fd;
+        do {
+            fd = open(path, O_RDONLY | O_CLOEXEC);
+        } while (fd == -1 && errno == EINTR);
+        if (fd == -1) {
+            if (errno != ENOENT && errno != ESRCH) {
+                unknown = 1;
+            }
+            continue; /* gone meanwhile, or recorded as unreadable */
+        }
+        char buf[512];
+        ssize_t got;
+        do {
+            got = read(fd, buf, sizeof(buf) - 1);
+        } while (got == -1 && errno == EINTR);
+        int read_errno = errno;
+        close(fd);
+        if (got <= 0) {
+            /* An exited process can leave an empty or ESRCH read behind; only a missing directory
+             * confirms it is gone. */
+            int gone = (got == 0 || read_errno == ESRCH) && access(dir, F_OK) == -1 && errno == ENOENT;
+            if (!gone) {
+                unknown = 1;
+            }
+            continue;
+        }
+        buf[got] = '\0';
+        /* "pid (comm) state ppid pgrp ...": comm may itself hold ')', so take the last one. */
+        char* end = strrchr(buf, ')');
+        int pid = atoi(buf);
+        char state;
+        int ppid, pgrp;
+        if (end == NULL || sscanf(end + 1, " %c %d %d", &state, &ppid, &pgrp) != 3) {
+            unknown = 1;
+            continue;
+        }
+        if (pgrp == pgid && pid != exclude_pid && state != 'Z' && state != 'X') {
+            live = 1;
+            break;
+        }
+    }
+    closedir(proc);
+    return live ? 1 : (unknown ? -1 : 0);
+#endif
 }
 
 PTY_EXPORT int pty_get_errno(void)

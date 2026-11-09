@@ -51,7 +51,28 @@ namespace Porta.Pty
         /// <summary>
         /// Gets the pty process exit code.
         /// </summary>
+        /// <remarks>
+        /// On Unix a process ended by a signal reports 0 here, as it always has; <see cref="ExitSignal"/>
+        /// says which signal it was.
+        /// </remarks>
         int ExitCode { get; }
+
+        /// <summary>
+        /// Gets the signal that ended the pty process, or 0 when it exited on its own or has not exited
+        /// yet; <see cref="HasExited"/> tells those two apart. Matches
+        /// <see cref="PtyExitedEventArgs.ExitSignal"/>.
+        /// </summary>
+        /// <remarks>
+        /// Unix only: always 0 on Windows, which has no signals. A default interface implementation,
+        /// so existing implementers keep compiling.
+        /// </remarks>
+        int ExitSignal => 0;
+
+        /// <summary>
+        /// Gets a value indicating whether the pty process has exited and its exit been reported, so that
+        /// <see cref="ExitCode"/> and <see cref="ExitSignal"/> are final.
+        /// </summary>
+        bool HasExited => this.WaitForExit(0);
 
         /// <summary>
         /// Wait for the pty process to exit up to a given timeout.
@@ -64,6 +85,40 @@ namespace Porta.Pty
         /// Immediately terminates the pty process.
         /// </summary>
         void Kill();
+
+        /// <summary>
+        /// Terminates the pty process, and by default everything it started, without blocking the caller.
+        /// </summary>
+        /// <param name="entireProcessTree">
+        /// True (the default) to end the process's descendants too. On Unix that is the pty's process
+        /// group, which the process leads; a descendant that moved to a group of its own (a job-control
+        /// shell's jobs) gets the hangup the shell and the terminal send it instead. The group gets SIGHUP,
+        /// then SIGKILL after the grace period, which also ends a descendant that ignores SIGHUP and
+        /// outlives the process: the process is kept uncollected until then, so its pid and group id
+        /// cannot be reissued, and its exit is reported when the task completes. On Windows it is the job
+        /// object the process was started in. False ends only the process itself.
+        /// </param>
+        /// <param name="grace">
+        /// Unix: how long after SIGHUP before SIGKILL is sent; one second by default. With the tree it
+        /// ends early once the process has exited and nothing else in its group is alive (or is waited out
+        /// where membership cannot be read), and SIGKILL then goes to the group; without it, SIGKILL is
+        /// skipped if the process exits sooner. Signals are only ever sent while the process is
+        /// uncollected, so they cannot reach a process that reused its id. Ignored on Windows, which
+        /// terminates at once.
+        /// </param>
+        /// <returns>
+        /// A task that completes once SIGKILL has been sent to the group (with the tree), or once the
+        /// process has exited or SIGKILL has been sent (without it).
+        /// </returns>
+        /// <remarks>
+        /// A default interface implementation calling <see cref="Kill"/>, so existing implementers keep
+        /// compiling.
+        /// </remarks>
+        System.Threading.Tasks.Task KillAsync(bool entireProcessTree = true, TimeSpan? grace = null)
+        {
+            this.Kill();
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
 
         /// <summary>
         /// Change the size of the pty.

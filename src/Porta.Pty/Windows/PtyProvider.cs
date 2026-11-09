@@ -8,6 +8,7 @@ namespace Porta.Pty.Windows
     using System.ComponentModel;
     using System.Diagnostics;
     using System.IO;
+    using System.Linq;
     using System.Runtime.InteropServices;
     using System.Runtime.Versioning;
     using System.Text;
@@ -57,7 +58,13 @@ namespace Porta.Pty.Windows
             return StartPseudoConsoleAsync(options, trace, cancellationToken);
         }
 
-        private static string GetAppOnPath(string app, string cwd, IDictionary<string, string> env)
+        /// <summary>
+        /// Resolves the app as CreateProcess and cmd.exe would, except that the parent's current directory is
+        /// never searched implicitly: a bare name is looked up in this app's directory and then on PATH, a
+        /// relative path with a directory against the working directory the child will get. Each candidate is
+        /// tried as it is first, then with each PATHEXT extension in order. An app found nowhere resolves, as before, to the child's working directory.
+        /// </summary>
+        internal static string GetAppOnPath(string app, string cwd, IDictionary<string, string> env)
         {
             bool isWow64 = Environment.GetEnvironmentVariable("PROCESSOR_ARCHITEW6432") != null;
 
@@ -74,6 +81,7 @@ namespace Porta.Pty.Windows
             var sysnativePathWithSlash = sysnativePath + Path.DirectorySeparatorChar;
             var system32Path = Path.Combine(windir, "System32");
             var system32PathWithSlash = system32Path + Path.DirectorySeparatorChar;
+            string[] pathExtensions = GetPathExtensions(env);
 
             try
             {
@@ -100,14 +108,15 @@ namespace Porta.Pty.Windows
                         return Path.Combine(system32Path, app.Substring(sysnativePathWithSlash.Length));
                     }
 
-                    return app;
+                    return FindWithExtensions(app, pathExtensions) ?? app;
                 }
 
                 if (Path.GetDirectoryName(app) != string.Empty)
                 {
                     // We have a directory and the directory is relative. Make the path absolute
-                    // to the current working directory.
-                    return Path.Combine(cwd, app);
+                    // to the working directory the child will get, not this process's.
+                    string relative = Path.Combine(cwd, app);
+                    return FindWithExtensions(relative, pathExtensions) ?? relative;
                 }
             }
             catch (ArgumentException)
@@ -122,13 +131,12 @@ namespace Porta.Pty.Windows
             string? pathEnvironment = (env != null && env.TryGetValue("PATH", out string? p) ? p : null)
                 ?? Environment.GetEnvironmentVariable("PATH");
 
-            if (string.IsNullOrWhiteSpace(pathEnvironment))
+            // This app's own directory first, as CreateProcess searches it; then PATH.
+            var paths = new List<string> { AppContext.BaseDirectory };
+            if (!string.IsNullOrWhiteSpace(pathEnvironment))
             {
-                // No PATH environment. Make path absolute to the cwd
-                return Path.Combine(cwd, app);
+                paths.AddRange(pathEnvironment.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries));
             }
-
-            var paths = new List<string>(pathEnvironment.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries));
             if (isWow64)
             {
                 // On Wow64, if %PATH% contains %WINDIR%\System32 but does not have %WINDIR%\Sysnative, add it before System32.
@@ -163,26 +171,62 @@ namespace Porta.Pty.Windows
 
                 // The path entry is absolute.
                 string fullPath = isPathEntryRooted ? Path.Combine(pathEntry, app) : Path.Combine(cwd, pathEntry, app);
-                if (File.Exists(fullPath))
+                if (FindWithExtensions(fullPath, pathExtensions) is { } found)
                 {
-                    return fullPath;
+                    return found;
                 }
+            }
 
-                var withExtension = fullPath + ".com";
-                if (File.Exists(withExtension))
-                {
-                    return withExtension;
-                }
+            // Not found on PATH. Make path absolute to the cwd
+            return Path.Combine(cwd, app);
+        }
 
-                withExtension = fullPath + ".exe";
+        /// <summary>
+        /// The file a candidate path names: as it is if that file exists, extension or not (CreateProcess runs
+        /// an extensionless executable), then with each PATHEXT extension appended, in order.
+        /// </summary>
+        /// <returns>The existing file, or null.</returns>
+        internal static string? FindWithExtensions(string candidate, string[] pathExtensions)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            foreach (string extension in pathExtensions)
+            {
+                string withExtension = candidate + extension;
                 if (File.Exists(withExtension))
                 {
                     return withExtension;
                 }
             }
 
-            // Not found on PATH. Make path absolute to the cwd
-            return Path.Combine(cwd, app);
+            return null;
+        }
+
+        /// <summary>PATHEXT from the child's environment, else this process's, else cmd.exe's default.</summary>
+        internal static string[] GetPathExtensions(IDictionary<string, string>? env)
+        {
+            string? pathExt = (env != null && env.TryGetValue("PATHEXT", out string? e) ? e : null)
+                ?? Environment.GetEnvironmentVariable("PATHEXT");
+            if (string.IsNullOrWhiteSpace(pathExt))
+            {
+                pathExt = ".COM;.EXE;.BAT;.CMD";
+            }
+
+            return pathExt
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(extension => extension.StartsWith('.'))
+                .ToArray();
+        }
+
+        /// <summary>The command interpreter that runs a batch file: %ComSpec% of the child, else of this process, else System32\cmd.exe.</summary>
+        private static string GetComSpec(IDictionary<string, string>? env)
+        {
+            string? comSpec = (env != null && env.TryGetValue("ComSpec", out string? c) ? c : null)
+                ?? Environment.GetEnvironmentVariable("ComSpec");
+            return string.IsNullOrWhiteSpace(comSpec) ? Path.Combine(Environment.SystemDirectory, "cmd.exe") : comSpec;
         }
 
         private static string GetEnvironmentString(IDictionary<string, string> environment)
@@ -209,6 +253,12 @@ namespace Porta.Pty.Windows
 
             // An extra null at the end indicates end of list.
             result.Append('\0');
+
+            // An empty block (PtyOptions.InheritEnvironment false, nothing given) is still two nulls.
+            if (environment.Count == 0)
+            {
+                result.Append('\0');
+            }
 
             return result.ToString();
         }
@@ -280,26 +330,8 @@ namespace Porta.Pty.Windows
                 try
                 {
                     string app = GetAppOnPath(options.App, options.Cwd, options.Environment);
-                    string arguments = options.VerbatimCommandLine ?
-                        WindowsArguments.FormatVerbatim(options.CommandLine) :
-                        WindowsArguments.Format(options.CommandLine);
-
-                    var commandLine = new StringBuilder(app.Length + arguments.Length + 4);
-                    bool quoteApp = app.Contains(" ") && !app.StartsWith("\"") && !app.EndsWith("\"");
-                    if (quoteApp)
-                    {
-                        commandLine.Append('"').Append(app).Append('"');
-                    }
-                    else
-                    {
-                        commandLine.Append(app);
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(arguments))
-                    {
-                        commandLine.Append(' ');
-                        commandLine.Append(arguments);
-                    }
+                    (_, string commandLine) = WindowsArguments.BuildCommandLine(
+                        app, options.CommandLine, options.VerbatimCommandLine, GetComSpec(options.Environment));
 
                     trace.TraceInformation(
                         $"Starting terminal process '{app}' with command line {commandLine} "
