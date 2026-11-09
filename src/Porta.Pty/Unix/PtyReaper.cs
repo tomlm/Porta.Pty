@@ -45,12 +45,18 @@ namespace Porta.Pty.Unix
         /// </summary>
         private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(100);
 
+        /// <summary>
+        /// How often <see cref="Sweep"/> asks after every watched child, in case its exit event was lost.
+        /// </summary>
+        private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(1);
+
         private static readonly Lazy<PtyReaper> InstanceHolder =
             new(() => new PtyReaper(), LazyThreadSafetyMode.ExecutionAndPublication);
 
         private readonly object gate = new();
         private readonly Dictionary<int, Entry> children = new();
         private readonly int queue;
+        private int sweeps;
 
         private PtyReaper()
         {
@@ -67,10 +73,35 @@ namespace Porta.Pty.Unix
         /// <summary>
         /// Attempts to collect the status of one child without blocking.
         /// </summary>
-        /// <returns>The pid on success, 0 if it is still running, -1 on failure.</returns>
+        /// <returns>
+        /// The pid on success, 0 if it is still running, -1 on failure, or <see cref="Deferred"/> when
+        /// it has exited but its owner will collect it later.
+        /// </returns>
         internal delegate int ReapAttempt(int pid, ref int status);
 
+        /// <summary>
+        /// A <see cref="ReapAttempt"/> result: the child has exited, and its connection is holding it
+        /// uncollected (so its pid and process group stay reserved) and will collect and report it
+        /// itself. The reaper stops watching it.
+        /// </summary>
+        internal const int Deferred = -2;
+
         internal static PtyReaper Instance => InstanceHolder.Value;
+
+        /// <summary>
+        /// Gets or sets a test seam: an exit event for a pid this returns true for is dropped, as macOS
+        /// sometimes drops one, so that only the <see cref="Sweep"/> backstop can deliver that exit.
+        /// </summary>
+        internal Func<int, bool>? LoseExitEvent { get; set; }
+
+        /// <summary>
+        /// Gets or sets a test seam: the sweep skips a pid this returns true for, so a test can keep a child's
+        /// exit unreported for as long as it needs to.
+        /// </summary>
+        internal Func<int, bool>? HoldSweep { get; set; }
+
+        /// <summary>Gets how many sweeps have completed, so a test can wait for later ones rather than for time.</summary>
+        internal int Sweeps => Volatile.Read(ref this.sweeps);
 
         /// <summary>
         /// Whether this kernel can report child exits.
@@ -143,12 +174,31 @@ namespace Porta.Pty.Unix
         private async Task WatchAsync()
         {
             var pids = new int[64];
+            var sinceSweep = Stopwatch.StartNew();
 
             while (true)
             {
                 try
                 {
-                    await PtyPoller.Instance.WaitReadableAsync(this.queue, CancellationToken.None).ConfigureAwait(false);
+                    // Woken by the queue, or after SweepInterval at the latest for the backstop.
+                    using (var interval = new CancellationTokenSource(SweepInterval))
+                    {
+                        try
+                        {
+                            await PtyPoller.Instance.WaitReadableAsync(this.queue, interval.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (interval.IsCancellationRequested)
+                        {
+                        }
+                    }
+
+                    // On every pass that is due, not only on a quiet queue: a busy queue would
+                    // otherwise put the sweep off for as long as other children keep exiting.
+                    if (sinceSweep.Elapsed >= SweepInterval)
+                    {
+                        sinceSweep.Restart();
+                        this.Sweep();
+                    }
 
                     int count = pty_exit_drain(this.queue, pids, pids.Length);
 
@@ -167,6 +217,12 @@ namespace Porta.Pty.Unix
 
                     for (var i = 0; i < count; i++)
                     {
+                        if (this.LoseExitEvent?.Invoke(pids[i]) == true)
+                        {
+                            // Test seam: this event is dropped as if the kernel had never sent it.
+                            continue;
+                        }
+
                         this.Collect(pids[i], out _);
                     }
                 }
@@ -199,11 +255,47 @@ namespace Porta.Pty.Unix
         }
 
         /// <summary>
+        /// The backstop: asks after every watched child, without waiting for the kernel to report it.
+        /// </summary>
+        /// <remarks>
+        /// macOS sometimes never delivers the kqueue NOTE_EXIT of a child that has exited, leaving it a
+        /// zombie with WaitForExit and ProcessExited never completing (measured through this library:
+        /// 2 of about 3,800 exits, and once in a C harness for more than two hours). Each watched pid
+        /// gets the same no-hang reap the event would have led to, so a lost event costs at most one
+        /// <see cref="SweepInterval"/> rather than the exit. An exit is still delivered once: the
+        /// connection collects under its own lock, so only one attempt ever gets the status, and the
+        /// entry is removed before the exit is reported. A child still running keeps its watch as it
+        /// is; re-arming it here would leak a pidfd per sweep on Linux.
+        /// </remarks>
+        private void Sweep()
+        {
+            int[] pids;
+            lock (this.gate)
+            {
+                pids = new int[this.children.Count];
+                this.children.Keys.CopyTo(pids, 0);
+            }
+
+            foreach (int pid in pids)
+            {
+                if (this.HoldSweep?.Invoke(pid) == true)
+                {
+                    continue;
+                }
+
+                this.Collect(pid, out _, rearm: false);
+            }
+
+            Interlocked.Increment(ref this.sweeps);
+        }
+
+        /// <summary>
         /// Reaps one pid if it has exited, re-arming the watch if it has not.
         /// </summary>
         /// <param name="pid">The child to look at.</param>
         /// <param name="watchError">The errno from a failed re-arm, or 0.</param>
-        private ReapOutcome Collect(int pid, out int watchError)
+        /// <param name="rearm">Whether a child still running gets its one-shot watch armed again.</param>
+        private ReapOutcome Collect(int pid, out int watchError, bool rearm = true)
         {
             watchError = 0;
             Entry? entry;
@@ -229,7 +321,7 @@ namespace Porta.Pty.Unix
                 try
                 {
                     result = entry!.Attempt(pid, ref status);
-                    if (result >= 0 || Marshal.GetLastPInvokeError() != EINTR)
+                    if (result >= 0 || result == Deferred || Marshal.GetLastPInvokeError() != EINTR)
                     {
                         break;
                     }
@@ -240,6 +332,12 @@ namespace Porta.Pty.Unix
                     result = -1;
                     break;
                 }
+            }
+
+            if (result == 0 && !rearm)
+            {
+                // Still running, asked by the sweep: no notification was spent, so the watch stands.
+                return ReapOutcome.Watched;
             }
 
             if (result == 0)

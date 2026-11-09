@@ -3,6 +3,7 @@
 
 namespace Porta.Pty.Mac
 {
+    using System;
     using static Porta.Pty.Mac.NativeMethods;
 
     /// <summary>
@@ -35,12 +36,10 @@ namespace Porta.Pty.Mac
         protected override bool Kill(int controller)
         {
             // SIGHUP first, then SIGKILL only if the child is still there after a brief grace period.
-            // Both go through SignalChild, so neither reaches a pid that has been collected meanwhile.
+            // Both go through SignalChild, so neither reaches a pid that has been collected meanwhile. The
+            // grace period runs on a timer rather than on the caller, who used to be blocked for it.
             bool result = this.SignalChild(SIGHUP);
-            if (!this.WaitForExit(100))
-            {
-                this.SignalChild(SIGKILL);
-            }
+            this.PendingGraceKill = this.KillAfterGraceAsync(TimeSpan.FromMilliseconds(100), processGroup: false);
 
             return result;
         }

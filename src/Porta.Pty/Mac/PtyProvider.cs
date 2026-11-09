@@ -25,8 +25,9 @@ namespace Porta.Pty.Mac
             string?[] terminalArgs = GetExecvpArgs(options);
 
             // Convert environment dictionary to "KEY=VALUE" string array for native code
+            // A clean environment always passes an array, empty or not: null would mean "inherit".
             string?[]? envp = null;
-            if (options.Environment != null && options.Environment.Count > 0)
+            if (options.Environment != null && (options.Environment.Count > 0 || !options.InheritEnvironment))
             {
                 envp = options.Environment
                     .Select(kvp => $"{kvp.Key}={kvp.Value}")
@@ -66,13 +67,9 @@ namespace Porta.Pty.Mac
 
             // Use native shim to spawn process - this avoids W^X issues
             // by performing fork+exec entirely in native code
-            var result = pty_spawn(
-                options.App,
-                terminalArgs,
-                envp,
-                options.Cwd,
-                ref term,
-                ref winSize);
+            var result = options.InheritEnvironment
+                ? pty_spawn(options.App, terminalArgs, envp, options.Cwd, ref term, ref winSize)
+                : pty_spawn_ex(options.App, terminalArgs, envp, options.Cwd, ref term, ref winSize, PTY_SPAWN_CLEAR_ENV);
 
             if (result.Pid == -1)
             {
