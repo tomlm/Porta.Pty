@@ -95,10 +95,18 @@ namespace Porta.Pty
                 throw new ArgumentNullException(nameof(options.Environment));
             }
 
-            IDictionary<string, string> environment = MergeEnvironment(PlatformServices.PtyEnvironment, null);
-            environment = MergeEnvironment(options.Environment, environment);
+            if (options.InheritEnvironment)
+            {
+                IDictionary<string, string> environment = MergeEnvironment(PlatformServices.PtyEnvironment, null);
+                environment = MergeEnvironment(options.Environment, environment);
 
-            options.Environment = environment;
+                options.Environment = environment;
+            }
+            else
+            {
+                // Copied as given, empty values included: there is nothing to remove from.
+                options.Environment = new Dictionary<string, string>(options.Environment, PlatformServices.EnvironmentVariableComparer);
+            }
 
             return PlatformServices.PtyProvider.StartTerminalAsync(options, Trace, cancellationToken);
         }
