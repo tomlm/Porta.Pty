@@ -77,10 +77,7 @@ namespace Porta.Pty.Tests
         [DataRow(24, 24)]
         public void UnrelatedWatchErrors_StillThrowWithRetryError(int firstError, int retryError)
         {
-            if (OperatingSystem.IsWindows())
-            {
-                Assert.Inconclusive("Unix reaper registration");
-            }
+            RequireUnixReaper();
 
             const int pid = int.MaxValue;
             int watches = 0;
@@ -111,10 +108,7 @@ namespace Porta.Pty.Tests
         [TestMethod]
         public void FailedRearm_AfterConcurrentRemoval_DoesNotFailStartup()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                Assert.Inconclusive("Unix reaper registration");
-            }
+            RequireUnixReaper();
 
             const int pid = int.MaxValue;
             var reaper = Unix.PtyReaper.Instance;
@@ -142,10 +136,7 @@ namespace Porta.Pty.Tests
         [DataRow(true)]
         public void FailedWatch_CollectedOrDeferred_DoesNotRearm(bool deferred)
         {
-            if (OperatingSystem.IsWindows())
-            {
-                Assert.Inconclusive("Unix reaper registration");
-            }
+            RequireUnixReaper();
 
             const int pid = int.MaxValue;
             int watches = 0;
@@ -209,16 +200,23 @@ namespace Porta.Pty.Tests
                 },
             };
             int waits = 0;
+            bool controllerClosed = false;
             provider.WaitForCleanup = (int child, ref int status, int options) =>
             {
                 waits++;
+                int descriptorState = fcntl(fd, 1);
+                int descriptorError = Marshal.GetLastPInvokeError();
+                controllerClosed = descriptorState == -1 && descriptorError == 9;
+                controllerClosed.Should().BeTrue("the controller must be closed before cleanup waits");
+                options.Should().Be(0, "production cleanup requests a blocking wait");
                 if (interruptWait && waits == 1)
                 {
                     Marshal.SetLastPInvokeError(4);
                     return -1;
                 }
 
-                return waitpid(child, ref status, options);
+                // Exercise real collection without allowing a regression to block the test runner.
+                return WaitForChildBounded(child, ref status);
             };
             try
             {
@@ -240,20 +238,54 @@ namespace Porta.Pty.Tests
             finally
             {
                 provider.BeforeConnection = null;
+                // This test's controller is still ours only when cleanup never closed it.
+                if (fd >= 0 && !controllerClosed)
+                {
+                    close(fd);
+                }
+
                 if (pid > 0)
                 {
-                    // Only the test's child, and only if it is still ours to collect.
                     int status = 0;
                     if (waitpid(pid, ref status, 1) == 0)
                     {
                         kill(pid, 9);
-                        while (waitpid(pid, ref status, 0) < 0 && Marshal.GetLastPInvokeError() == 4)
-                        {
-                        }
+                        WaitForChildBounded(pid, ref status);
                     }
                 }
 
                 File.Delete(ready);
+            }
+        }
+
+        private static int WaitForChildBounded(int pid, ref int status)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (true)
+            {
+                int result = waitpid(pid, ref status, 1);
+                int error = Marshal.GetLastPInvokeError();
+                if (result > 0 || (result < 0 && error != 4))
+                {
+                    Marshal.SetLastPInvokeError(error);
+                    return result;
+                }
+
+                clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10), "the test's child must be collected within the bound");
+                Thread.Sleep(10);
+            }
+        }
+
+        private static void RequireUnixReaper()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.Inconclusive("Unix reaper registration");
+            }
+
+            if (!Unix.PtyReaper.Instance.IsSupported)
+            {
+                Assert.Inconclusive("this kernel cannot report child exits");
             }
         }
 
@@ -288,6 +320,9 @@ namespace Porta.Pty.Tests
                 Environment = new Dictionary<string, string>(),
                 UseAsyncIo = true,
             };
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int close(int fd);
 
         [DllImport("libc", SetLastError = true)]
         private static extern int fcntl(int fd, int command);
